@@ -105,10 +105,9 @@ async function login() {
 
     if (res.ok) {
         localStorage.setItem("user_id", data.user_id);
-        localStorage.setItem("username", username); 
-        window.location.href = "/chat";
+        localStorage.setItem("username", username);
+        window.location.href = "/chat-ui";
     } else {
-        msg.style.color = "red";
         msg.innerText = data.detail || "Login failed";
     }
 }
