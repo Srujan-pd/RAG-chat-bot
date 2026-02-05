@@ -1,5 +1,0 @@
-project_id     = "P_ID"
-region         = "us-central1"
-db_password    = "PASSWORD"
-gemini_api_key = "API_KEY"
-image_url      = "gcr.io/P_ID/genai-chatbot:latest"

@@ -1,58 +1,81 @@
-from google.cloud import speech, texttospeech
-import google.generativeai as genai
-import uuid, os
+import os, uuid
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from sqlalchemy.orm import Session
+from database import SessionLocal
+from models import Chat
+from google import genai
+from google.genai import types
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+router = APIRouter(prefix="/voice")
 
-model = genai.GenerativeModel("gemini-2.0-flash")
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-speech_client = speech.SpeechClient()
-tts_client = texttospeech.TextToSpeechClient()
+# Lazy client initialization
+_client = None
 
-chat_history = []
+def get_gemini_client():
+    """Get or create Gemini client"""
+    global _client
+    if _client is None:
+        # Remove GOOGLE_API_KEY to avoid conflicts
+        if "GOOGLE_API_KEY" in os.environ:
+            del os.environ["GOOGLE_API_KEY"]
+        
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set!")
+        
+        _client = genai.Client(api_key=api_key)
+    return _client
 
-def voice_to_text(audio_path: str) -> str:
-    with open(audio_path, "rb") as f:
-        audio = speech.RecognitionAudio(content=f.read())
+@router.post("/")
+async def voice_chat(
+    file: UploadFile = File(...), 
+    user_id: str = Form("default_user"),
+    db: Session = Depends(get_db)
+):
+    """
+    Voice chat endpoint - accepts audio file
+    Transcribes and responds using Gemini
+    """
+    audio_bytes = await file.read()
+    
+    try:
+        client = get_gemini_client()
+        
+        # Step 1: Gemini handles transcription + logic
+        model_res = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                "Transcribe the audio and provide a helpful response. Format: [Transcription] | [Response]",
+                types.Part.from_bytes(data=audio_bytes, mime_type=file.content_type)
+            ]
+        )
+        
+        full_text = model_res.text
+        parts = full_text.split("|")
+        user_text = parts[0].strip() if len(parts) > 1 else "Voice Message"
+        ai_text = parts[-1].strip()
 
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        language_code="en-US"
-    )
+        # Step 2: Save to DB
+        new_chat = Chat(
+            user_id=user_id, 
+            session_id="voice_session", 
+            question=user_text, 
+            answer=ai_text
+        )
+        db.add(new_chat)
+        db.commit()
 
-    response = speech_client.recognize(config=config, audio=audio)
-    if not response.results:
-        return "Sorry, I could not understand."
-    return response.results[0].alternatives[0].transcript
-
-def get_ai_response(text: str) -> str:
-    chat_history.append({"role": "user", "parts": [text]})
-    response = model.generate_content(chat_history)
-    chat_history.append({"role": "model", "parts": [response.text]})
-    return response.text
-
-def text_to_voice(text: str) -> str:
-    synthesis_input = texttospeech.SynthesisInput(text=text)
-
-    voice = texttospeech.VoiceSelectionParams(
-        language_code="en-US",
-        ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
-    )
-
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3
-    )
-
-    response = tts_client.synthesize_speech(
-        input=synthesis_input,
-        voice=voice,
-        audio_config=audio_config
-    )
-
-    os.makedirs("/tmp/audio", exist_ok=True)
-    filename = f"/tmp/audio/{uuid.uuid4()}.mp3"
-
-    with open(filename, "wb") as out:
-        out.write(response.audio_content)
-
-    return filename
+        return {
+            "user_said": user_text,
+            "message": ai_text,
+            "status": "success"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

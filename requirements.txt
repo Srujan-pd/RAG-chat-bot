@@ -1,14 +1,33 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-gunicorn==21.2.0
-bcrypt==3.2.0
-sqlalchemy==2.0.29
-passlib[bcrypt]==1.7.4
-python-multipart==0.0.9
-jinja2==3.1.4
-google-generativeai>=0.8.0
-google-cloud-speech==2.26.1
-google-cloud-texttospeech==2.16.3
-psycopg2-binary
-passlib[argon2]
-argon2-cffi
+# API Framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# Supabase Client
+supabase==2.11.0
+
+# Google Gemini AI
+google-genai==0.2.2
+
+# Web Scraping
+beautifulsoup4==4.12.3
+requests==2.32.3
+
+# LangChain
+langchain==0.3.13
+langchain-community==0.3.13
+langchain-huggingface==0.1.2
+sentence-transformers
+
+# Vector Database
+faiss-cpu==1.9.0.post1
+sentence-transformers==3.3.1
+
+# Utilities
+python-multipart==0.0.20
+pydantic==2.10.3
+python-dotenv==1.0.1
+numpy==1.26.4
