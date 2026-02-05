@@ -1,0 +1,42 @@
+name: Deploy Backend to Cloud Run
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  PROJECT_ID: poc-genai-chatbot
+  REGION: us-central1
+  SERVICE: primis-digital-bot
+  REPO: cloud-run-source-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - run: |
+          docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE .
+          docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE
+
+      - run: |
+          gcloud run deploy $SERVICE \
+            --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE \
+            --region $REGION \
+            --memory 2Gi \
+            --cpu 1 \
+            --no-cpu-throttling \
+            --set-env-vars SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket \
+            --set-secrets SUPABASE_KEY=SUPABASE_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
+            --platform managed \
+            --quiet
