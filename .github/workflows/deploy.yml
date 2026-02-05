@@ -1,4 +1,4 @@
-name: Deploy to Cloud Run
+name: Deploy to Cloud Run (Using GitHub Secrets)
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
         run: |
           docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest
       
-      - name: Deploy to Cloud Run
+      - name: Deploy to Cloud Run (with env vars)
         run: |
           gcloud run deploy $SERVICE \
             --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest \
@@ -55,8 +55,7 @@ jobs:
             --min-instances 0 \
             --max-instances 10 \
             --allow-unauthenticated \
-            --set-env-vars SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket \
-            --set-secrets SUPABASE_KEY=SUPABASE_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,DATABASE_URL=DATABASE_URL:latest \
+            --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket,SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }}" \
             --quiet
       
       - name: Show service URL
