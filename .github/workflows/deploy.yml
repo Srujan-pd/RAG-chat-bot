@@ -48,6 +48,8 @@ jobs:
             --region $REGION \
             --memory 2Gi \
             --cpu 1 \
+            --cpu-boost \
+            --timeout 900 \
             --no-cpu-throttling \
             --tag staging \
             --set-env-vars SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket \
