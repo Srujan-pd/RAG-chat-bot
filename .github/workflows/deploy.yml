@@ -1,10 +1,9 @@
-name: Deploy Backend to Cloud Run
+name: Deploy to Cloud Run
 
 on:
   push:
     branches: [ main ]
 
-# REQUIRED for google-github-actions/auth
 permissions:
   contents: read
   id-token: write
@@ -20,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout source
+      - name: Checkout code
         uses: actions/checkout@v4
       
       - name: Authenticate to Google Cloud
@@ -28,7 +27,7 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       
-      - name: Set up gcloud
+      - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
@@ -36,23 +35,31 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       
-      - name: Build and push Docker image
+      - name: Build Docker image
         run: |
-          docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE .
-          docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE
+          docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest .
+      
+      - name: Push Docker image
+        run: |
+          docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest
       
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy $SERVICE \
-            --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE \
+            --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest \
             --region $REGION \
-            --memory 2Gi \
-            --cpu 1 \
-            --cpu-boost \
-            --timeout 900 \
-            --no-cpu-throttling \
-            --tag staging \
-            --set-env-vars SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket,SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} \
             --platform managed \
+            --memory 2Gi \
+            --cpu 2 \
+            --timeout 900 \
+            --min-instances 0 \
+            --max-instances 10 \
             --allow-unauthenticated \
+            --set-env-vars SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_BUCKET_NAME=vectorstore-bucket \
+            --set-secrets SUPABASE_KEY=SUPABASE_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,DATABASE_URL=DATABASE_URL:latest \
             --quiet
+      
+      - name: Show service URL
+        run: |
+          echo "🚀 Service deployed!"
+          gcloud run services describe $SERVICE --region $REGION --format='value(status.url)'
