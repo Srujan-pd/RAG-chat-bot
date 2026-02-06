@@ -30,7 +30,7 @@ jobs:
       run: |
         echo "🚀 Deploying to Cloud Run..."
         
-        # Deploy with traffic splitting preserved
+        # Deploy with all settings in a single line
         gcloud run deploy $SERVICE_NAME \
           --source . \
           --region $REGION \
@@ -38,15 +38,15 @@ jobs:
           --allow-unauthenticated \
           --memory 1Gi \
           --timeout 300s \
-          --min-instances 1 \  # Keep at least 1 instance to reduce cold starts
+          --min-instances 1 \
           --set-env-vars "PORT=8080" \
           --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
           --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
           --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
           --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
           --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-          --no-traffic \  # Don't send traffic immediately
-          --tag "v${{ github.sha }}"  # Tag this revision
+          --no-traffic \
+          --tag "v${{ github.sha }}"
     
     - name: Get service info
       id: service-info
@@ -75,7 +75,7 @@ jobs:
     - name: Wait and test new revision
       run: |
         echo "⏳ Waiting for new revision to be ready..."
-        sleep 45  # Give more time for vector store to load
+        sleep 45
         
         SERVICE_URL="${{ steps.service-info.outputs.service_url }}"
         
@@ -86,30 +86,19 @@ jobs:
             echo "✅ Health check passed on attempt $i"
             break
           else
-            echo "⚠️  Health check failed on attempt $i, waiting..."
+            echo "⚠️ Health check failed on attempt $i, waiting..."
             sleep 10
           fi
         done
-        
-        # Test ready endpoint
-        echo "🧪 Testing ready endpoint..."
-        READY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/ready" || echo "000")
-        if [ "$READY_STATUS" = "200" ]; then
-          echo "✅ Service is fully ready!"
-        else
-          echo "⚠️  Service ready check returned HTTP $READY_STATUS"
-        fi
     
     - name: Send traffic to new revision
       run: |
         echo "🚦 Sending all traffic to new revision..."
         
-        LATEST_REV="${{ steps.service-info.outputs.latest_revision }}"
-        
         # Update traffic to 100% to new revision
         gcloud run services update-traffic $SERVICE_NAME \
           --region $REGION \
-          --to-latest \  # Send all traffic to latest ready revision
+          --to-latest \
           --platform managed
         
         echo "✅ Traffic routed to latest revision"
@@ -123,19 +112,12 @@ jobs:
         echo "✅ Service: $SERVICE_NAME"
         echo "📍 Region: $REGION"
         echo "🔗 URL: ${{ steps.service-info.outputs.service_url }}"
-        echo "🏷️  Revision tag: v${{ github.sha }}"
+        echo "🏷️ Revision tag: v${{ github.sha }}"
         echo ""
         echo "🔍 Quick tests:"
         echo "   Health: ${{ steps.service-info.outputs.service_url }}/health"
-        echo "   Readiness: ${{ steps.service-info.outputs.service_url }}/ready"
         echo "   Debug: ${{ steps.service-info.outputs.service_url }}/debug"
         echo ""
         echo "📊 List revisions:"
         echo "   gcloud run revisions list --service=$SERVICE_NAME --region=$REGION"
-        echo ""
-        echo "🔄 Traffic management:"
-        echo "   # Split traffic between revisions"
-        echo "   gcloud run services update-traffic $SERVICE_NAME \\"
-        echo "     --region $REGION \\"
-        echo "     --to-revisions REVISION-1=50,REVISION-2=50"
         echo "="*60
