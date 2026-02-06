@@ -1,12 +1,9 @@
 from datetime import datetime, timedelta
 import os, uuid
-import asyncio
 from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Chat
-from datetime import datetime, timedelta
-from fastapi.responses import StreamingResponse
 from rag_engine import rag_answer
 
 router = APIRouter(prefix="/chat")
@@ -18,8 +15,6 @@ def get_db():
     finally:
         db.close()
 
-
-# SESSION HANDLER
 def get_or_create_session(request: Request, response: Response):
     session_id = request.cookies.get("session_id")
     if not session_id:
@@ -28,43 +23,10 @@ def get_or_create_session(request: Request, response: Response):
             key="session_id",
             value=session_id,
             httponly=True,
-            max_age = 60 * 60 * 24 * 7,    # 7days
+            max_age=60 * 60 * 24 * 7,  # 7 days
             samesite="lax"
         )
     return session_id
-
-# LOAD CHAT HISTORY FOR CONTEXT
-def build_prompt(db, session_id, user_message, context_limit=10):
-    """
-    Build prompt with recent chat history for context.
-    context_limit: Number of recent exchanges to include (default 10)
-    """
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-
-    chats = (
-        db.query(Chat)
-        .filter(
-            Chat.session_id == session_id,
-            Chat.created_at >= seven_days_ago
-        )
-        .order_by(Chat.created_at.desc())
-        .limit(context_limit)
-        .all()
-    )
-
-    # Reverse to get chronological order
-    chats = list(reversed(chats))
-
-    if chats:
-        prompt = "You are a helpful support AI assistant. Previous conversation:\n\n"
-        for chat in chats:
-            prompt += f"User: {chat.question}\n"
-            prompt += f"Assistant: {chat.answer}\n\n"
-        prompt += f"User: {user_message}\nAssistant:"
-    else:
-        prompt = f"You are a helpful support AI assistant.\n\nUser: {user_message}\nAssistant:"
-
-    return prompt
 
 @router.post("/")
 async def chat_main(
@@ -103,10 +65,9 @@ async def chat_main(
         }
 
     except Exception as e:
-        print("❌ Error:", str(e))
+        print("❌ Chat Error:", str(e))
         db.rollback()
         raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
-
 
 @router.get("/history/{user_id}")
 async def get_chat_history(
@@ -117,7 +78,6 @@ async def get_chat_history(
 ):
     """
     Get chat history for current session
-    Returns array directly so frontend .slice() works
     """
     session_id = request.cookies.get("session_id")
     if not session_id:

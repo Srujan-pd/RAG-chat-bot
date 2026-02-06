@@ -1,4 +1,4 @@
-# API Framework
+# Core Framework
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 
@@ -12,16 +12,18 @@ supabase==2.11.0
 # Google Gemini AI
 google-genai==0.2.2
 
-# LangChain (only required packages)
+# LangChain Core
 langchain==0.3.13
 langchain-community==0.3.13
 langchain-huggingface==0.1.2
 
-# Vector Database & Embeddings
-faiss-cpu==1.9.0.post1
+# Sentence Transformers for embeddings
 sentence-transformers==3.3.1
+
+# Vector Database
+faiss-cpu==1.9.0.post1
 
 # Utilities
 python-multipart==0.0.20
 pydantic==2.10.3
-python-dotenv==1.0.1
+numpy==1.26.4

@@ -1,29 +1,12 @@
-import os
-import logging
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from typing import List, Optional
-import uvicorn
+import logging
 
-# Import modules
-from database import engine, get_db, Base
-from models import Chat
-import rag_engine
+app = FastAPI(title="Primis Digital Support Bot")
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI
-app = FastAPI(
-    title="Primis Digital Chatbot",
-    description="RAG-powered chatbot with Gemini AI",
-    version="1.0.0"
-)
-
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,130 +15,136 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
-class ChatRequest(BaseModel):
-    user_id: str
-    session_id: str
-    question: str
-
-class ChatResponse(BaseModel):
-    answer: str
-    session_id: str
-
-class VoiceRequest(BaseModel):
-    user_id: str
-    session_id: str
-    audio_data: str  # base64 encoded
-
-# Startup event
 @app.on_event("startup")
-async def startup():
-    """Initialize database and load vector store"""
-    logger.info("🚀 Starting Primis Digital Chatbot...")
-    
-    # Create tables
-    Base.metadata.create_all(bind=engine)
-    logger.info("✅ Database initialized")
-    
-    # Initialize Gemini client
-    logger.info("🔑 Initializing Gemini client...")
-    rag_engine.initialize_gemini()
-    
-    # Start vector store loading in background
-    logger.info("🔄 Vector store loading started in background")
-    rag_engine.start_loading_vectorstore()
+async def startup_event():
+    """Initialize database"""
+    try:
+        from database import engine, Base
+        import models
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database initialized")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {str(e)}")
 
-# ROOT ENDPOINT
-@app.get("/", tags=["Root"])
+@app.get("/")
 async def root():
-    """Root endpoint - Health check"""
+    """Root endpoint"""
     return {
-        "status": "online",
-        "service": "Primis Digital Chatbot",
+        "message": "Primis Digital Support AI Bot API",
         "version": "1.0.0",
-        "vectorstore_loaded": not rag_engine.is_loading
+        "status": "running",
+        "endpoints": {
+            "POST /chat/": "Chat with AI (form-data: text, user_id)",
+            "GET /chat/history/{user_id}": "Get chat history",
+            "POST /voice/": "Voice chat (form-data: file, user_id)",
+            "GET /health": "Health check",
+            "GET /debug": "Debug information"
+        }
     }
 
-# HEALTH ENDPOINT
-@app.get("/health", tags=["Health"])
+@app.get("/health")
 async def health():
-    """Detailed health check"""
-    return {
-        "status": "healthy",
-        "vectorstore_status": "loaded" if not rag_engine.is_loading else "loading",
-        "gemini_initialized": rag_engine.gemini_client is not None
-    }
-
-# CHAT ENDPOINT
-@app.post("/chat/", response_model=ChatResponse, tags=["Chat"])
-async def chat_main(request: ChatRequest, db: Session = Depends(get_db)):
-    """Main chat endpoint with RAG"""
+    """Health check endpoint"""
     try:
-        logger.info(f"📨 Question from {request.user_id}: {request.question}")
+        from rag_engine import db, loading_error, loading_complete, is_loading, load_attempts
         
-        # Check if vector store is loaded
-        if rag_engine.is_loading:
-            logger.warning("⏳ Vector store still loading...")
-            return ChatResponse(
-                answer="System is initializing. Please try again in a few seconds.",
-                session_id=request.session_id
-            )
+        # Check database connection
+        from database import SessionLocal
+        db_session = SessionLocal()
+        db_healthy = False
+        try:
+            db_session.execute("SELECT 1")
+            db_healthy = True
+        except:
+            db_healthy = False
+        finally:
+            db_session.close()
         
-        # Get answer from RAG engine
-        answer = rag_engine.get_answer(request.question)
+        # Determine overall status
+        if loading_error:
+            status = "degraded"
+        elif not db_healthy:
+            status = "degraded"
+        else:
+            status = "healthy"
         
-        logger.info(f"✅ Answer generated: {answer[:100]}...")
+        vectorstore_status = "ready" if db is not None else ("error" if loading_complete else "loading")
         
-        # Save to database
-        chat_entry = Chat(
-            user_id=request.user_id,
-            session_id=request.session_id,
-            question=request.question,
-            answer=answer
-        )
-        db.add(chat_entry)
-        db.commit()
-        
-        return ChatResponse(
-            answer=answer,
-            session_id=request.session_id
-        )
+        return {
+            "status": status,
+            "database": "healthy" if db_healthy else "unhealthy",
+            "vectorstore_status": vectorstore_status,
+            "vectorstore_ready": db is not None,
+            "vectorstore_loading": is_loading,
+            "load_attempts": load_attempts,
+            "loading_error": loading_error if loading_error else None
+        }
         
     except Exception as e:
-        logger.error(f"❌ Chat Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
 
-# GET CHAT HISTORY
-@app.get("/chat/history/{user_id}", tags=["Chat"])
-async def get_chat_history(user_id: str, db: Session = Depends(get_db)):
-    """Get chat history for a user"""
+@app.get("/debug")
+async def debug():
+    """Debug endpoint to check vector store status"""
     try:
-        chats = db.query(Chat).filter(Chat.user_id == user_id).order_by(Chat.created_at.desc()).limit(50).all()
+        from rag_engine import db, loading_error, loading_complete, is_loading, load_attempts
+        import os
         
-        history = [{
-            "id": chat.id,
-            "session_id": chat.session_id,
-            "question": chat.question,
-            "answer": chat.answer,
-            "created_at": chat.created_at.isoformat()
-        } for chat in chats]
+        # Check local files
+        vectorstore_path = "/tmp/vectorstore"
+        local_files = []
+        if os.path.exists(vectorstore_path):
+            try:
+                local_files = os.listdir(vectorstore_path)
+                # Add file sizes
+                local_files_with_size = []
+                for f in local_files:
+                    file_path = os.path.join(vectorstore_path, f)
+                    if os.path.isfile(file_path):
+                        size = os.path.getsize(file_path)
+                        local_files_with_size.append(f"{f} ({size} bytes)")
+                    else:
+                        local_files_with_size.append(f"{f} (directory)")
+                local_files = local_files_with_size
+            except Exception as e:
+                local_files = [f"error: {str(e)}"]
         
-        return {"user_id": user_id, "history": history, "count": len(history)}
-        
+        return {
+            "app": "running",
+            "vector_db_loaded": db is not None,
+            "vector_count": db.index.ntotal if db else 0,
+            "loading_complete": loading_complete,
+            "is_loading": is_loading,
+            "load_attempts": load_attempts,
+            "loading_error": loading_error,
+            "environment_variables": {
+                "supabase_bucket_set": bool(os.getenv("SUPABASE_BUCKET_NAME")),
+                "supabase_url_set": bool(os.getenv("SUPABASE_URL")),
+                "gemini_key_set": bool(os.getenv("GEMINI_API_KEY")),
+                "database_url_set": bool(os.getenv("DATABASE_URL"))
+            },
+            "local_vectorstore_path": vectorstore_path,
+            "local_files": local_files,
+            "local_path_exists": os.path.exists(vectorstore_path),
+            "port": os.getenv("PORT", "8080")
+        }
     except Exception as e:
-        logger.error(f"❌ History Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching history: {str(e)}")
+        return {
+            "error": f"Debug check failed: {str(e)}",
+            "traceback": str(e.__traceback__)
+        }
 
-# VOICE CHAT ENDPOINT
-@app.post("/voice/", tags=["Voice"])
-async def voice_chat(request: VoiceRequest):
-    """Voice chat endpoint (placeholder for future implementation)"""
-    return {
-        "message": "Voice chat endpoint - Coming soon",
-        "user_id": request.user_id,
-        "session_id": request.session_id
-    }
+# Import and include routers after app is created
+from chat import router as chat_router
+from voice_chat import router as voice_router
+
+app.include_router(chat_router)
+app.include_router(voice_router)
 
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)

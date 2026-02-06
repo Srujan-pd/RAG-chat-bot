@@ -1,51 +1,48 @@
-# Use Python 3.11 slim image
+# Use slim Python image with minimal dependencies
 FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
 # Install only essential system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+RUN apt-get update && apt-get install -y \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Copy requirements first (for layer caching)
+# Copy requirements first (better layer caching)
 COPY requirements.txt .
 
-# Install Python packages with optimizations
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Python packages without cache
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download embedding model (adds ~100MB but saves runtime)
-RUN mkdir -p /app/model_cache && \
-    python3 -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', cache_folder='/app/model_cache')"
+# PRE-DOWNLOAD THE EMBEDDING MODEL DURING BUILD (CRITICAL!)
+# This avoids HuggingFace rate limits at runtime
+RUN python3 -c "from sentence_transformers import SentenceTransformer; \
+    print('📥 Downloading embedding model...'); \
+    SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', cache_folder='/tmp'); \
+    print('✅ Model downloaded successfully')"
 
-# Set environment for model cache
-ENV SENTENCE_TRANSFORMERS_HOME=/app/model_cache
+# Set environment variables to use local cache
+ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV HF_DATASETS_OFFLINE=1
+ENV SENTENCE_TRANSFORMERS_HOME=/tmp
+ENV TRANSFORMERS_CACHE=/tmp
+ENV HF_HOME=/tmp
+ENV TORCH_HOME=/tmp
 
-# Copy only necessary application files
-COPY main.py .
-COPY rag_engine.py .
-COPY database.py .
-COPY models.py .
-COPY supabase_manager.py .
+# Copy application code
+COPY . .
 
-# Create runtime directories
+# Create runtime directories for Cloud Run
 RUN mkdir -p /tmp/vectorstore
 
-# Environment variables
+# Use PORT environment variable
 ENV PORT=8080
-ENV PYTHONUNBUFFERED=1
-
-# Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
 # Start application
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
