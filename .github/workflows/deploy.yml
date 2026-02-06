@@ -43,8 +43,20 @@ jobs:
         run: |
           docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest
       
+      - name: Force clean existing service
+        run: |
+          # Force delete the service if it exists
+          if gcloud run services describe $SERVICE --region $REGION --quiet 2>/dev/null; then
+            echo "🗑️ Deleting existing service to avoid type conflicts..."
+            gcloud run services delete $SERVICE --region $REGION --quiet
+            sleep 15  # Wait for deletion to complete
+          else
+            echo "✅ No existing service found, will create new one"
+          fi
+      
       - name: Deploy to Cloud Run
         run: |
+          echo "🚀 Deploying fresh service..."
           gcloud run deploy $SERVICE \
             --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO/$SERVICE:latest \
             --region $REGION \
@@ -55,15 +67,20 @@ jobs:
             --min-instances 0 \
             --max-instances 10 \
             --allow-unauthenticated \
-            --clear-secrets \
-            --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
-            --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-            --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
-            --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
+            --set-env-vars="SUPABASE_BUCKET_NAME=vectorstore-bucket" \
+            --set-env-vars="SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
+            --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
+            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="PYTHONUNBUFFERED=1" \
+            --set-env-vars="HF_HUB_OFFLINE=1" \
+            --set-env-vars="TRANSFORMERS_OFFLINE=1" \
             --quiet
       
       - name: Show service URL
         run: |
-          echo "🚀 Service deployed!"
-          gcloud run services describe $SERVICE --region $REGION --format='value(status.url)'
+          echo "🎉 Service successfully deployed!"
+          SERVICE_URL=$(gcloud run services describe $SERVICE --region $REGION --format='value(status.url)')
+          echo "🌐 Service URL: $SERVICE_URL"
+          echo "📊 Health check: $SERVICE_URL/health"
+          echo "🔧 Debug info: $SERVICE_URL/debug"
