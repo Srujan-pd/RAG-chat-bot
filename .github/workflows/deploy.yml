@@ -12,7 +12,6 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     
     steps:
     - name: Checkout code
@@ -26,22 +25,12 @@ jobs:
     
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v1
-      with:
-        project_id: ${{ secrets.GCP_PROJECT_ID }}
     
-    - name: Configure Docker
+    - name: Deploy to Cloud Run
       run: |
-        gcloud auth configure-docker -q
-    
-    - name: Build and Deploy to Cloud Run
-      id: deploy
-      run: |
-        echo "🚀 Starting deployment to Cloud Run..."
-        echo "📦 Project: $PROJECT_ID"
-        echo "📍 Region: $REGION"
-        echo "📝 Service: $SERVICE_NAME"
+        echo "🚀 Deploying to Cloud Run..."
         
-        # Deploy with all environment variables
+        # Deploy with all settings in a single line
         gcloud run deploy $SERVICE_NAME \
           --source . \
           --region $REGION \
@@ -49,40 +38,29 @@ jobs:
           --allow-unauthenticated \
           --memory 1Gi \
           --timeout 300s \
-          --min-instances 0 \
-          --max-instances 3 \
+          --min-instances 1 \
           --set-env-vars "PORT=8080" \
           --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
           --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
           --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
           --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
           --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-          --quiet
-        
-        echo "✅ Deployment initiated successfully!"
+          --no-traffic \
+          --tag "v${{ github.sha }}"
     
-    - name: Wait for deployment to complete
-      run: |
-        echo "⏳ Waiting for service to be ready..."
-        sleep 30
-        
-        # Check service status
-        SERVICE_STATUS=$(gcloud run services describe $SERVICE_NAME \
-          --region $REGION \
-          --format="value(status.conditions[0].status)" 2>/dev/null || echo "UNKNOWN")
-        
-        echo "📊 Service status: $SERVICE_STATUS"
-        
-        if [ "$SERVICE_STATUS" = "True" ]; then
-          echo "✅ Service is ready!"
-        else
-          echo "⚠️  Service may still be initializing"
-        fi
-    
-    - name: Get service URL and test
+    - name: Get service info
       id: service-info
       run: |
-        echo "🔍 Retrieving service information..."
+        # Get the latest revision
+        LATEST_REV=$(gcloud run revisions list \
+          --service $SERVICE_NAME \
+          --region $REGION \
+          --filter="status.conditions.type=Ready AND status.conditions.status=True" \
+          --sort-by="~metadata.creationTimestamp" \
+          --limit=1 \
+          --format="value(metadata.name)")
+        
+        echo "latest_revision=$LATEST_REV" >> $GITHUB_OUTPUT
         
         # Get service URL
         SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
@@ -91,66 +69,41 @@ jobs:
         
         echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
         
-        echo "🎉 Deployment complete!"
+        echo "📊 Latest ready revision: $LATEST_REV"
         echo "🌐 Service URL: $SERVICE_URL"
-        echo "📊 Health check: $SERVICE_URL/health"
-        echo "🔧 Debug info: $SERVICE_URL/debug"
+    
+    - name: Wait and test new revision
+      run: |
+        echo "⏳ Waiting for new revision to be ready..."
+        sleep 45
         
-        # Wait a bit more for full initialization
-        echo "⏳ Waiting for application to fully start..."
-        sleep 15
+        SERVICE_URL="${{ steps.service-info.outputs.service_url }}"
         
-        # Test health endpoint with retry
+        # Test health endpoint
         echo "🧪 Testing health endpoint..."
-        MAX_RETRIES=5
-        RETRY_COUNT=0
-        
-        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-          HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo "000")
-          
-          if [ "$HEALTH_STATUS" = "200" ]; then
-            echo "✅ Health check passed! (HTTP $HEALTH_STATUS)"
+        for i in {1..5}; do
+          if curl -f -s "$SERVICE_URL/health" > /dev/null; then
+            echo "✅ Health check passed on attempt $i"
             break
           else
-            RETRY_COUNT=$((RETRY_COUNT+1))
-            echo "⚠️  Health check failed (HTTP $HEALTH_STATUS). Retry $RETRY_COUNT/$MAX_RETRIES..."
+            echo "⚠️ Health check failed on attempt $i, waiting..."
             sleep 10
           fi
         done
-        
-        if [ "$HEALTH_STATUS" != "200" ]; then
-          echo "❌ Health check failed after $MAX_RETRIES attempts"
-          echo "⚠️  Service may have started but health endpoint is not responding"
-        fi
     
-    - name: Check recent logs
-      if: always()
+    - name: Send traffic to new revision
       run: |
-        echo "📋 Checking recent logs for errors..."
+        echo "🚦 Sending all traffic to new revision..."
         
-        # Get logs from the latest revision
-        LATEST_REVISION=$(gcloud run revisions list \
-          --service $SERVICE_NAME \
+        # Update traffic to 100% to new revision
+        gcloud run services update-traffic $SERVICE_NAME \
           --region $REGION \
-          --limit 1 \
-          --format="value(metadata.name)")
+          --to-latest \
+          --platform managed
         
-        if [ -n "$LATEST_REVISION" ]; then
-          echo "📝 Latest revision: $LATEST_REVISION"
-          
-          # Show last 20 lines of logs
-          gcloud logging read \
-            "resource.type=cloud_run_revision \
-            AND resource.labels.service_name=$SERVICE_NAME \
-            AND resource.labels.revision_name=$LATEST_REVISION" \
-            --limit 20 \
-            --format="value(timestamp, textPayload)" \
-            --project $PROJECT_ID || echo "⚠️  Could not retrieve logs"
-        else
-          echo "⚠️  Could not find latest revision"
-        fi
+        echo "✅ Traffic routed to latest revision"
     
-    - name: Summary
+    - name: Show deployment summary
       run: |
         echo ""
         echo "="*60
@@ -159,12 +112,12 @@ jobs:
         echo "✅ Service: $SERVICE_NAME"
         echo "📍 Region: $REGION"
         echo "🔗 URL: ${{ steps.service-info.outputs.service_url }}"
+        echo "🏷️ Revision tag: v${{ github.sha }}"
         echo ""
         echo "🔍 Quick tests:"
-        echo "   Health check: ${{ steps.service-info.outputs.service_url }}/health"
-        echo "   Debug info: ${{ steps.service-info.outputs.service_url }}/debug"
-        echo "   Static files: ${{ steps.service-info.outputs.service_url }}/static"
+        echo "   Health: ${{ steps.service-info.outputs.service_url }}/health"
+        echo "   Debug: ${{ steps.service-info.outputs.service_url }}/debug"
         echo ""
-        echo "📊 View logs:"
-        echo "   gcloud logging read \"resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE_NAME\" --limit 50 --project $PROJECT_ID"
+        echo "📊 List revisions:"
+        echo "   gcloud run revisions list --service=$SERVICE_NAME --region=$REGION"
         echo "="*60
