@@ -55,6 +55,7 @@ jobs:
             --min-instances 0 \
             --max-instances 10 \
             --allow-unauthenticated \
+            --clear-secrets \
             --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
             --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
             --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
