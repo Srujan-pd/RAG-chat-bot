@@ -4,10 +4,7 @@ from fastapi.responses import RedirectResponse
 import logging
 import os
 import time
-from chat import router as chat_router
-from voice_chat import router as voice_router
 from fastapi.staticfiles import StaticFiles
-from rag_engine import start_loading_vectorstore, initialize_gemini, wait_for_vectorstore
 
 app = FastAPI(title="Support AI Bot")
 
@@ -27,35 +24,15 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check for Cloud Run"""
-    from rag_engine import db, gemini_client
-    from database import engine
-    
-    status = {
+    return {
         "status": "healthy",
         "service": "Primis Digital AI Bot",
-        "timestamp": time.time(),
-        "services": {
-            "database": engine is not None,
-            "vectorstore": db is not None,
-            "gemini": gemini_client is not None,
-        }
+        "timestamp": time.time()
     }
-    return status
-
-@app.get("/ready")
-async def ready_check():
-    """Readiness check - only returns 200 when fully ready"""
-    from rag_engine import db, gemini_client
-    from database import engine
-    
-    if engine is None or db is None or gemini_client is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-    
-    return {"status": "ready", "message": "All services initialized"}
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize all services on startup - BLOCKS until ready"""
+    """Initialize all services on startup"""
     logger.info("🚀 Starting Primis Digital AI Bot...")
     
     try:
@@ -70,40 +47,44 @@ async def startup_event():
         else:
             logger.warning("⚠️ Database engine not available")
         
-        # Initialize AI services - BLOCKING
-        logger.info("🤖 Initializing Gemini...")
-        gemini_ready = initialize_gemini()
+        # Initialize AI services
+        try:
+            from rag_engine import initialize_gemini, start_loading_vectorstore
+            logger.info("🤖 Initializing Gemini...")
+            gemini_ready = initialize_gemini()
+            
+            if gemini_ready:
+                logger.info("✅ Gemini initialized")
+            else:
+                logger.warning("⚠️ Gemini initialization failed")
+            
+            logger.info("📚 Loading vector store in background...")
+            start_loading_vectorstore()
+            
+        except ImportError as e:
+            logger.warning(f"⚠️ Could not import rag_engine: {e}")
         
-        if gemini_ready:
-            logger.info("✅ Gemini initialized")
-        else:
-            logger.error("❌ Gemini initialization failed")
-        
-        logger.info("📚 Loading vector store...")
-        
-        # Start loading in background
-        start_loading_vectorstore()
-        
-        # Wait for vector store with timeout
-        logger.info("⏳ Waiting for vector store to load (max 60 seconds)...")
-        vectorstore_ready = wait_for_vectorstore(timeout=60)
-        
-        if vectorstore_ready:
-            logger.info("✅ Vector store loaded successfully")
-        else:
-            logger.warning("⚠️ Vector store not loaded, continuing without it")
-        
-        logger.info("🎉 All services initialized successfully!")
+        logger.info("🎉 Services initialized!")
         
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
         import traceback
         traceback.print_exc()
-        # Don't crash - continue with degraded service
 
-# Include routers
-app.include_router(chat_router)
-app.include_router(voice_router)
+# Import and include routers after initialization
+try:
+    from chat import router as chat_router
+    app.include_router(chat_router)
+    logger.info("✅ Chat router loaded")
+except ImportError as e:
+    logger.error(f"❌ Failed to load chat router: {e}")
+
+try:
+    from voice_chat import router as voice_router
+    app.include_router(voice_router)
+    logger.info("✅ Voice router loaded")
+except ImportError as e:
+    logger.warning(f"⚠️ Failed to load voice router: {e}")
 
 # Root redirect
 @app.get("/")
@@ -113,23 +94,25 @@ def root():
 # Debug endpoint
 @app.get("/debug")
 async def debug_info():
-    from database import engine
-    from rag_engine import db, gemini_client
-    
-    return {
-        "service": "Primis Digital AI Bot",
-        "timestamp": time.time(),
-        "services": {
-            "database": "connected" if engine else "disconnected",
-            "vectorstore": "loaded" if db else "loading/error",
-            "gemini": "ready" if gemini_client else "not ready",
-            "vectorstore_size": len(db.index.ntotal) if db else 0
-        },
-        "environment": {
-            "port": os.getenv("PORT", "8080"),
-            "node": os.getenv("K_REVISION", "unknown"),
+    try:
+        from database import engine
+        from rag_engine import db, gemini_client
+        
+        vectorstore_info = "not loaded"
+        if db:
+            vectorstore_info = f"loaded ({db.index.ntotal if hasattr(db.index, 'ntotal') else 'unknown'} vectors)"
+        
+        return {
+            "service": "Primis Digital AI Bot",
+            "timestamp": time.time(),
+            "services": {
+                "database": "connected" if engine else "disconnected",
+                "vectorstore": vectorstore_info,
+                "gemini": "ready" if gemini_client else "not ready"
+            }
         }
-    }
+    except Exception as e:
+        return {"error": str(e), "timestamp": time.time()}
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
