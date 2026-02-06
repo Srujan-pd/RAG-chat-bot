@@ -22,12 +22,7 @@ LOCAL_PATH = "/tmp/vectorstore"
 db = None
 is_loading = True
 gemini_client = None
-
-# Greeting patterns
-GREETINGS = [
-    "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
-    "hi there", "hello there", "hey there", "greetings", "howdy"
-]
+load_error = None
 
 def initialize_gemini():
     """Initialize Gemini client"""
@@ -35,7 +30,8 @@ def initialize_gemini():
     try:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment")
+            logger.warning("⚠️ GEMINI_API_KEY not found in environment")
+            return False
         
         gemini_client = genai.Client(api_key=api_key)
         logger.info("✅ Gemini client initialized")
@@ -46,13 +42,19 @@ def initialize_gemini():
 
 def load_vectorstore():
     """Load vector store from Supabase"""
-    global db, is_loading
+    global db, is_loading, load_error
     
     try:
         logger.info("📥 Starting vector store download...")
         
         # Create local directory
         os.makedirs(LOCAL_PATH, exist_ok=True)
+        
+        # Check for required environment variables
+        if not os.getenv("SUPABASE_URL") or not os.getenv("SUPABASE_KEY"):
+            logger.warning("⚠️ Supabase credentials not found. Skipping vector store load.")
+            is_loading = False
+            return
         
         # Initialize Supabase manager
         storage = SupabaseStorageManager()
@@ -68,20 +70,23 @@ def load_vectorstore():
             success = storage.download_file(remote_path, local_file, BUCKET_NAME)
             
             if not success:
-                raise Exception(f"Failed to download {remote_path}")
-            
-            # Verify file exists and has content
-            if os.path.exists(local_file):
-                size = os.path.getsize(local_file)
-                logger.info(f"✅ Downloaded {filename}: {size:,} bytes")
-            else:
-                raise Exception(f"File not found after download: {filename}")
+                logger.warning(f"⚠️ Failed to download {remote_path}, trying to continue...")
+                # Don't crash if one file fails
+                continue
+        
+        # Check if files exist
+        faiss_file = os.path.join(LOCAL_PATH, "index.faiss")
+        pkl_file = os.path.join(LOCAL_PATH, "index.pkl")
+        
+        if not os.path.exists(faiss_file) or not os.path.exists(pkl_file):
+            logger.warning("⚠️ Vector store files not found. RAG will use fallback responses.")
+            is_loading = False
+            return
         
         # Initialize embeddings
         logger.info("🔧 Initializing embeddings...")
         embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            cache_folder="/app/model_cache"
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
         
         # Load FAISS index
@@ -93,20 +98,17 @@ def load_vectorstore():
         )
         
         # Test the vector store
-        test_results = db.similarity_search("test query", k=1)
-        logger.info(f"✅ Vector store loaded! Test search returned {len(test_results)} results")
-        
-        # Log a sample of what's in the vector store
-        if test_results:
-            logger.info(f"📄 Sample content: {test_results[0].page_content[:200]}...")
+        test_results = db.similarity_search("test", k=1)
+        logger.info(f"✅ Vector store loaded! Test returned {len(test_results)} results")
         
         is_loading = False
         logger.info("🎉 Vector store ready!")
         
     except Exception as e:
         logger.error(f"❌ Vector store loading failed: {str(e)}")
-        logger.error(traceback.format_exc())
+        load_error = str(e)
         is_loading = False
+        # Don't crash the app, just log the error
 
 def start_loading_vectorstore():
     """Start loading vector store in background thread"""
@@ -114,76 +116,30 @@ def start_loading_vectorstore():
     thread.start()
     logger.info("🔄 Vector store loading in background...")
 
-def is_greeting(question: str) -> bool:
-    """Check if the question is a greeting"""
-    question_lower = question.lower().strip()
-    
-    # Check for exact greetings
-    if question_lower in GREETINGS:
-        return True
-    
-    # Check if starts with greeting
-    for greeting in GREETINGS:
-        if question_lower.startswith(greeting):
-            return True
-    
-    # Check for greeting patterns
-    greeting_indicators = ["hi,", "hello,", "hey,"]
-    for indicator in greeting_indicators:
-        if question_lower.startswith(indicator):
-            return True
-    
-    return False
-
 def get_answer(question: str, k: int = 4) -> str:
-    """Get answer using RAG with Gemini, with greeting handling"""
+    """Get answer using RAG with Gemini or fallback"""
     global db, gemini_client
+    
+    # Handle greetings
+    question_lower = question.lower().strip()
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+    
+    if question_lower in greetings:
+        return "Hello! 👋 I'm the Primis Digital AI assistant. How can I help you today?"
     
     try:
         # Check if system is ready
         if db is None:
-            return "❌ System not ready. Vector store not loaded yet."
+            logger.warning("⚠️ Vector store not loaded yet, using fallback response")
+            return "I'm still loading the knowledge base. Please try again in a moment or ask about Primis Digital services in the meantime."
         
         if gemini_client is None:
-            return "❌ Gemini client not initialized."
-        
-        # Handle greetings
-        if is_greeting(question):
-            logger.info(f"👋 Detected greeting: {question}")
-            greeting_response = """Hello! 👋 I'm the Primis Digital AI assistant.
-
-I can help you with information about:
-• Our services (AI, DevOps, Web Development, etc.)
-• Company information
-• Contact details
-• Projects and case studies
-
-How can I assist you today?"""
-            
-            # For very simple greetings, return the greeting response
-            question_lower = question.lower().strip()
-            if question_lower in ["hi", "hello", "hey", "hi there", "hello there", "hey there"]:
-                return greeting_response
-            
-            # For greetings followed by a question, process the question part
-            # Extract the actual question after greeting
-            for greeting in GREETINGS:
-                if question_lower.startswith(greeting):
-                    # Remove the greeting part
-                    actual_question = question[len(greeting):].strip()
-                    # Remove common punctuation after greeting
-                    if actual_question.startswith((",")):
-                        actual_question = actual_question[1:].strip()
-                    
-                    # If there's still text after greeting, process it
-                    if actual_question:
-                        logger.info(f"🔍 Processing question after greeting: {actual_question}")
-                        # Continue with RAG processing for the actual question
-                        question = actual_question
-                        break
-                    else:
-                        # Just greeting, no question
-                        return greeting_response
+            logger.warning("⚠️ Gemini client not initialized")
+            # Try to search vector store anyway
+            docs = db.similarity_search(question, k=k)
+            if docs:
+                return f"I found information about '{question}' in our knowledge base. For detailed answers, the AI system needs to be fully initialized."
+            return "The AI system is still initializing. Please try again shortly."
         
         # Search vector store
         logger.info(f"🔍 Searching for: {question}")
@@ -191,21 +147,10 @@ How can I assist you today?"""
         
         if not docs:
             logger.warning("⚠️ No relevant documents found")
-            # Provide helpful guidance instead of generic error
-            return """I couldn't find specific information about that in the Primis Digital knowledge base.
-
-I can help you with:
-• Services: AI development, DevOps, Web applications
-• Technologies: Python, React, AWS, Azure
-• Company information and contact details
-• Case studies and projects
-
-Could you rephrase your question or ask about something specific to Primis Digital?"""
+            return "I couldn't find specific information about that in the Primis Digital knowledge base. Could you rephrase or ask about our services, technologies, or company information?"
         
         # Log retrieved documents
         logger.info(f"📚 Found {len(docs)} relevant documents")
-        for i, doc in enumerate(docs):
-            logger.info(f"  Doc {i+1}: {doc.page_content[:100]}...")
         
         # Combine context
         context = "\n\n---\n\n".join([doc.page_content for doc in docs])
@@ -222,8 +167,8 @@ USER QUESTION: {question}
 
 INSTRUCTIONS:
 - Answer based ONLY on the provided context
-- Be specific and cite relevant details from the context
-- If the context doesn't contain enough information, say so politely and suggest related topics we can help with
+- Be specific and cite relevant details
+- If the context doesn't contain enough information, say so politely
 - Keep your answer concise and professional
 - Format your answer with clear paragraphs
 
@@ -243,5 +188,4 @@ ANSWER:"""
         
     except Exception as e:
         logger.error(f"❌ Error in get_answer: {str(e)}")
-        logger.error(traceback.format_exc())
-        return f"Error generating answer: {str(e)}"
+        return "I'm having trouble generating a response right now. Please try again or ask a different question about Primis Digital."

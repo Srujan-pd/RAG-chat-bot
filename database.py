@@ -1,45 +1,68 @@
-from sqlalchemy import create_engine, event
+import os
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool
-import os
+import logging
 
-# Database URL from environment
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Get DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set")
+# Log (without exposing full URL for security)
+if DATABASE_URL:
+    logger.info("✅ DATABASE_URL is configured")
+    # Show only first part for debugging
+    if "postgresql://" in DATABASE_URL:
+        logger.info("📊 Database type: PostgreSQL")
+else:
+    logger.warning("⚠️ DATABASE_URL not found in environment variables")
+    # Try to create a fallback for testing
+    DATABASE_URL = "sqlite:///./test.db"
+    logger.warning(f"⚠️ Using fallback SQLite database: {DATABASE_URL}")
 
-# Create engine with connection pooling
-engine = create_engine(
-    DATABASE_URL,
-    poolclass=QueuePool,
-    pool_size=5,          # Keep 5 connections open
-    max_overflow=10,      # Allow up to 10 additional connections
-    pool_pre_ping=True,   # Test connections before using
-    pool_recycle=300,     # Recycle connections after 5 minutes
-    echo=False            # Set to True for SQL debugging
-)
-
-# Session factory
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
-
+# Create engine and other objects
+engine = None
+SessionLocal = None
 Base = declarative_base()
 
-# Event listener to ensure connections are healthy
-@event.listens_for(engine, "connect")
-def receive_connect(dbapi_conn, connection_record):
-    """Set connection parameters on new connections"""
-    cursor = dbapi_conn.cursor()
-    cursor.execute("SET timezone='UTC'")
-    cursor.close()
+try:
+    # Create engine with retry settings for Cloud Run
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,  # Verify connections before using
+        pool_recycle=3600,   # Recycle connections every hour
+        echo=False           # Set to True for SQL debugging
+    )
+    
+    # Test connection
+    with engine.connect() as conn:
+        logger.info("✅ Database connected successfully!")
+    
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+except Exception as e:
+    logger.error(f"❌ Database connection failed: {e}")
+    import traceback
+    traceback.print_exc()
+    # Don't crash - allow app to start without database
+    engine = None
+    SessionLocal = None
 
 def get_db():
-    """Dependency for FastAPI routes"""
+    """Dependency to get DB session"""
+    if SessionLocal is None:
+        logger.error("❌ Database not available")
+        # Yield a mock session or handle gracefully
+        yield None
+        return
+        
     db = SessionLocal()
     try:
         yield db
