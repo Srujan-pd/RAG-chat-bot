@@ -84,3 +84,4 @@ jobs:
           echo "🌐 Service URL: $SERVICE_URL"
           echo "📊 Health check: $SERVICE_URL/health"
           echo "🔧 Debug info: $SERVICE_URL/debug"
+
