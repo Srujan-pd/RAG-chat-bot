@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import logging
@@ -27,7 +27,31 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Primis Digital AI Bot",
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "version": "1.0.0"
+    }
+
+@app.get("/ready")
+async def ready_check():
+    """Readiness check - returns 200 when services are ready"""
+    from rag_engine import db, gemini_client, is_loading, load_error
+    
+    if is_loading:
+        raise HTTPException(status_code=503, detail=f"Vector store loading... Error: {load_error}")
+    
+    if db is None:
+        raise HTTPException(status_code=503, detail=f"Vector store not loaded. Error: {load_error}")
+    
+    if gemini_client is None:
+        raise HTTPException(status_code=503, detail="Gemini not initialized")
+    
+    return {
+        "status": "ready",
+        "services": {
+            "vectorstore": "loaded",
+            "gemini": "ready",
+            "database": "ready"
+        }
     }
 
 @app.on_event("startup")
@@ -50,19 +74,25 @@ async def startup_event():
         # Initialize AI services
         try:
             from rag_engine import initialize_gemini, start_loading_vectorstore
+            
             logger.info("🤖 Initializing Gemini...")
             gemini_ready = initialize_gemini()
             
             if gemini_ready:
                 logger.info("✅ Gemini initialized")
             else:
-                logger.warning("⚠️ Gemini initialization failed")
+                logger.error("❌ Gemini initialization failed - check GEMINI_API_KEY")
             
             logger.info("📚 Loading vector store in background...")
             start_loading_vectorstore()
+            logger.info("🔄 Vector store loading started")
             
         except ImportError as e:
-            logger.warning(f"⚠️ Could not import rag_engine: {e}")
+            logger.error(f"❌ Could not import rag_engine: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error initializing AI services: {e}")
+            import traceback
+            traceback.print_exc()
         
         logger.info("🎉 Services initialized!")
         
@@ -94,21 +124,34 @@ def root():
 # Debug endpoint
 @app.get("/debug")
 async def debug_info():
+    """Debug endpoint to check service status"""
     try:
         from database import engine
-        from rag_engine import db, gemini_client
+        from rag_engine import db, gemini_client, is_loading, load_error
         
-        vectorstore_info = "not loaded"
-        if db:
-            vectorstore_info = f"loaded ({db.index.ntotal if hasattr(db.index, 'ntotal') else 'unknown'} vectors)"
+        # Check file existence
+        faiss_exists = os.path.exists("/tmp/vectorstore/index.faiss") if os.path.exists("/tmp/vectorstore") else False
+        pkl_exists = os.path.exists("/tmp/vectorstore/index.pkl") if os.path.exists("/tmp/vectorstore") else False
         
         return {
             "service": "Primis Digital AI Bot",
             "timestamp": time.time(),
             "services": {
                 "database": "connected" if engine else "disconnected",
-                "vectorstore": vectorstore_info,
-                "gemini": "ready" if gemini_client else "not ready"
+                "vectorstore_loaded": db is not None,
+                "vectorstore_loading": is_loading,
+                "vectorstore_error": load_error,
+                "gemini_ready": gemini_client is not None,
+                "files": {
+                    "faiss_exists": faiss_exists,
+                    "pkl_exists": pkl_exists
+                }
+            },
+            "environment": {
+                "supabase_url_set": bool(os.getenv("SUPABASE_URL")),
+                "supabase_key_set": bool(os.getenv("SUPABASE_KEY")),
+                "gemini_key_set": bool(os.getenv("GEMINI_API_KEY")),
+                "database_url_set": bool(os.getenv("DATABASE_URL"))
             }
         }
     except Exception as e:

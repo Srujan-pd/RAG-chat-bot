@@ -1,0 +1,29 @@
+# FastAPI
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+
+# AI
+google-generativeai==0.3.2
+langchain==0.0.349
+langchain-community==0.0.16
+langchain-huggingface==0.0.2
+
+# Vector store
+faiss-cpu==1.7.4
+sentence-transformers==2.2.2
+
+# Supabase
+supabase==1.1.1
+
+# File uploads
+python-multipart==0.0.6
+aiofiles==23.2.1
+
+# Utilities
+pydantic==2.5.0
+typing-extensions==4.9.0
