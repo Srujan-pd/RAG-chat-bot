@@ -2,6 +2,7 @@ import os
 import threading
 import traceback
 import logging
+import time
 from supabase_manager import SupabaseStorageManager
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -23,6 +24,7 @@ db = None
 is_loading = True
 gemini_client = None
 load_error = None
+load_complete = threading.Event()
 
 def initialize_gemini():
     """Initialize Gemini client"""
@@ -42,7 +44,7 @@ def initialize_gemini():
 
 def load_vectorstore():
     """Load vector store from Supabase"""
-    global db, is_loading, load_error
+    global db, is_loading, load_error, load_complete
     
     try:
         logger.info("📥 Starting vector store download...")
@@ -54,9 +56,11 @@ def load_vectorstore():
         if not os.getenv("SUPABASE_URL") or not os.getenv("SUPABASE_KEY"):
             logger.warning("⚠️ Supabase credentials not found. Skipping vector store load.")
             is_loading = False
+            load_complete.set()
             return
         
         # Initialize Supabase manager
+        logger.info("🔗 Connecting to Supabase...")
         storage = SupabaseStorageManager()
         
         # Download files from Supabase
@@ -70,17 +74,21 @@ def load_vectorstore():
             success = storage.download_file(remote_path, local_file, BUCKET_NAME)
             
             if not success:
-                logger.warning(f"⚠️ Failed to download {remote_path}, trying to continue...")
-                # Don't crash if one file fails
-                continue
+                logger.error(f"❌ Failed to download {remote_path}")
+                load_error = f"Failed to download {remote_path}"
+                is_loading = False
+                load_complete.set()
+                return
         
         # Check if files exist
         faiss_file = os.path.join(LOCAL_PATH, "index.faiss")
         pkl_file = os.path.join(LOCAL_PATH, "index.pkl")
         
         if not os.path.exists(faiss_file) or not os.path.exists(pkl_file):
-            logger.warning("⚠️ Vector store files not found. RAG will use fallback responses.")
+            logger.error("❌ Vector store files not found after download")
+            load_error = "Vector store files not found"
             is_loading = False
+            load_complete.set()
             return
         
         # Initialize embeddings
@@ -97,18 +105,19 @@ def load_vectorstore():
             allow_dangerous_deserialization=True
         )
         
-        # Test the vector store
-        test_results = db.similarity_search("test", k=1)
-        logger.info(f"✅ Vector store loaded! Test returned {len(test_results)} results")
+        # Log success
+        vector_count = db.index.ntotal if hasattr(db.index, 'ntotal') else "unknown"
+        logger.info(f"✅ [RAG THREAD] RAG Engine Ready! Vector store loaded with {vector_count} vectors")
         
         is_loading = False
-        logger.info("🎉 Vector store ready!")
+        load_complete.set()
         
     except Exception as e:
         logger.error(f"❌ Vector store loading failed: {str(e)}")
         load_error = str(e)
         is_loading = False
-        # Don't crash the app, just log the error
+        load_complete.set()
+        traceback.print_exc()
 
 def start_loading_vectorstore():
     """Start loading vector store in background thread"""
@@ -116,38 +125,51 @@ def start_loading_vectorstore():
     thread.start()
     logger.info("🔄 Vector store loading in background...")
 
+def wait_for_vectorstore(timeout=60):
+    """Wait for vector store to load with timeout"""
+    logger.info(f"⏳ Waiting for vector store (timeout: {timeout}s)...")
+    
+    if load_complete.wait(timeout=timeout):
+        if db is not None:
+            logger.info("✅ Vector store loaded successfully")
+            return True
+        else:
+            logger.warning("⚠️ Vector store loading completed but db is None")
+            return False
+    else:
+        logger.warning(f"⚠️ Vector store loading timeout after {timeout} seconds")
+        return False
+
 def get_answer(question: str, k: int = 4) -> str:
-    """Get answer using RAG with Gemini or fallback"""
+    """Get answer using RAG with Gemini"""
     global db, gemini_client
     
-    # Handle greetings
+    # Handle greetings immediately
     question_lower = question.lower().strip()
-    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hi there", "hello there"]
     
     if question_lower in greetings:
-        return "Hello! 👋 I'm the Primis Digital AI assistant. How can I help you today?"
+        return "Hello! 👋 I'm the Primis Digital AI assistant. I can help you with information about our services, technologies, and company. How can I assist you today?"
+    
+    # Check if still loading
+    if is_loading:
+        return "I'm still loading the knowledge base. Please try again in a moment. For now, you can ask about Primis Digital's services or contact information."
+    
+    # Check if failed to load
+    if db is None:
+        return "I'm having trouble accessing the knowledge base right now. Please try again shortly or contact support for assistance."
+    
+    if gemini_client is None:
+        return "The AI service is temporarily unavailable. Please try again in a moment."
     
     try:
-        # Check if system is ready
-        if db is None:
-            logger.warning("⚠️ Vector store not loaded yet, using fallback response")
-            return "I'm still loading the knowledge base. Please try again in a moment or ask about Primis Digital services in the meantime."
-        
-        if gemini_client is None:
-            logger.warning("⚠️ Gemini client not initialized")
-            # Try to search vector store anyway
-            docs = db.similarity_search(question, k=k)
-            if docs:
-                return f"I found information about '{question}' in our knowledge base. For detailed answers, the AI system needs to be fully initialized."
-            return "The AI system is still initializing. Please try again shortly."
-        
         # Search vector store
         logger.info(f"🔍 Searching for: {question}")
         docs = db.similarity_search(question, k=k)
         
         if not docs:
-            logger.warning("⚠️ No relevant documents found")
-            return "I couldn't find specific information about that in the Primis Digital knowledge base. Could you rephrase or ask about our services, technologies, or company information?"
+            logger.warning(f"⚠️ No relevant documents found for: {question}")
+            return "I couldn't find specific information about that in our knowledge base. You can ask about: our services (AI development, DevOps, web applications), technologies we use, company information, or how to contact us."
         
         # Log retrieved documents
         logger.info(f"📚 Found {len(docs)} relevant documents")
@@ -167,9 +189,9 @@ USER QUESTION: {question}
 
 INSTRUCTIONS:
 - Answer based ONLY on the provided context
-- Be specific and cite relevant details
-- If the context doesn't contain enough information, say so politely
-- Keep your answer concise and professional
+- Be specific and cite relevant details from the context
+- If the context doesn't contain enough information, politely say so and suggest related topics
+- Keep your answer concise and professional (2-4 paragraphs maximum)
 - Format your answer with clear paragraphs
 
 ANSWER:"""
@@ -188,4 +210,4 @@ ANSWER:"""
         
     except Exception as e:
         logger.error(f"❌ Error in get_answer: {str(e)}")
-        return "I'm having trouble generating a response right now. Please try again or ask a different question about Primis Digital."
+        return "I encountered an error while generating a response. Please try again with a different question or rephrase your query."
