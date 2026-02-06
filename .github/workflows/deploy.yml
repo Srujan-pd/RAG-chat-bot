@@ -5,18 +5,23 @@ on:
     branches: [ main ]
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  SERVICE_NAME: primis-digital-bot
-  REGION: us-central1
+  PROJECT_ID: "poc-genai-chatbot"
+  SERVICE_NAME: "primis-digital-bot"
+  REGION: "us-central1"
+  # This is the repository Cloud Run creates for source deployments
+  REPOSITORY: "cloud-run-source-deploy"
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
     
-    - id: auth
+    - name: Authenticate to Google Cloud
+      id: auth
       uses: google-github-actions/auth@v1
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
@@ -24,30 +29,16 @@ jobs:
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v1
     
-    - name: Configure Docker
+    - name: Deploy to Cloud Run (from source)
       run: |
-        gcloud auth configure-docker -q
-    
-    - name: Build Docker image
-      run: |
-        echo "🐳 Building Docker image..."
-        docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }} .
-    
-    - name: Push Docker image
-      run: |
-        echo "📤 Pushing Docker image..."
-        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }}
-    
-    - name: Deploy to Cloud Run
-      run: |
-        echo "🚀 Deploying to Cloud Run..."
+        echo "🚀 Deploying to Cloud Run from source..."
+        
         gcloud run deploy $SERVICE_NAME \
-          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:${{ github.sha }} \
+          --source . \
           --region $REGION \
           --platform managed \
           --allow-unauthenticated \
           --memory 1Gi \
-          --cpu 2 \
           --timeout 300s \
           --min-instances 1 \
           --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
@@ -56,9 +47,14 @@ jobs:
           --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
           --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket"
     
-    - name: Get service URL
+    - name: Get service info
       run: |
+        echo "📊 Getting service information..."
         SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
           --region $REGION \
           --format='value(status.url)')
+        
         echo "🌐 Service URL: $SERVICE_URL"
+        echo "🔗 Health check: $SERVICE_URL/health"
+        echo "🔧 Debug info: $SERVICE_URL/debug"
+        echo "📝 Ready check: $SERVICE_URL/ready"
