@@ -30,7 +30,7 @@ jobs:
       run: |
         echo "🚀 Deploying to Cloud Run..."
         
-        # Deploy with all settings in a single line
+        # REMOVED: --set-env-vars "PORT=8080" (PORT is reserved)
         gcloud run deploy $SERVICE_NAME \
           --source . \
           --region $REGION \
@@ -39,85 +39,18 @@ jobs:
           --memory 1Gi \
           --timeout 300s \
           --min-instances 1 \
-          --set-env-vars "PORT=8080" \
           --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
           --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
           --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
           --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
-          --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-          --no-traffic \
-          --tag "v${{ github.sha }}"
+          --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket"
     
     - name: Get service info
-      id: service-info
       run: |
-        # Get the latest revision
-        LATEST_REV=$(gcloud run revisions list \
-          --service $SERVICE_NAME \
-          --region $REGION \
-          --filter="status.conditions.type=Ready AND status.conditions.status=True" \
-          --sort-by="~metadata.creationTimestamp" \
-          --limit=1 \
-          --format="value(metadata.name)")
-        
-        echo "latest_revision=$LATEST_REV" >> $GITHUB_OUTPUT
-        
-        # Get service URL
         SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
           --region $REGION \
           --format='value(status.url)')
         
-        echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
-        
-        echo "📊 Latest ready revision: $LATEST_REV"
         echo "🌐 Service URL: $SERVICE_URL"
-    
-    - name: Wait and test new revision
-      run: |
-        echo "⏳ Waiting for new revision to be ready..."
-        sleep 45
-        
-        SERVICE_URL="${{ steps.service-info.outputs.service_url }}"
-        
-        # Test health endpoint
-        echo "🧪 Testing health endpoint..."
-        for i in {1..5}; do
-          if curl -f -s "$SERVICE_URL/health" > /dev/null; then
-            echo "✅ Health check passed on attempt $i"
-            break
-          else
-            echo "⚠️ Health check failed on attempt $i, waiting..."
-            sleep 10
-          fi
-        done
-    
-    - name: Send traffic to new revision
-      run: |
-        echo "🚦 Sending all traffic to new revision..."
-        
-        # Update traffic to 100% to new revision
-        gcloud run services update-traffic $SERVICE_NAME \
-          --region $REGION \
-          --to-latest \
-          --platform managed
-        
-        echo "✅ Traffic routed to latest revision"
-    
-    - name: Show deployment summary
-      run: |
-        echo ""
-        echo "="*60
-        echo "📋 DEPLOYMENT SUMMARY"
-        echo "="*60
-        echo "✅ Service: $SERVICE_NAME"
-        echo "📍 Region: $REGION"
-        echo "🔗 URL: ${{ steps.service-info.outputs.service_url }}"
-        echo "🏷️ Revision tag: v${{ github.sha }}"
-        echo ""
-        echo "🔍 Quick tests:"
-        echo "   Health: ${{ steps.service-info.outputs.service_url }}/health"
-        echo "   Debug: ${{ steps.service-info.outputs.service_url }}/debug"
-        echo ""
-        echo "📊 List revisions:"
-        echo "   gcloud run revisions list --service=$SERVICE_NAME --region=$REGION"
-        echo "="*60
+        echo "🔗 Health check: $SERVICE_URL/health"
+        echo "🔧 Debug info: $SERVICE_URL/debug"
