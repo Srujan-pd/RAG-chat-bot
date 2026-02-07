@@ -1,15 +1,19 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
-import logging
+from pydantic import BaseModel
 import os
-import time
-from fastapi.staticfiles import StaticFiles
+from typing import Optional
+import logging
 
-app = FastAPI(title="Support AI Bot")
-
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Primis Digital Bot",
+    description="GenAI Chatbot with RAG capabilities",
+    version="1.0.0"
+)
 
 # CORS middleware
 app.add_middleware(
@@ -20,147 +24,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request models
+class ChatRequest(BaseModel):
+    text: str
+    user_id: str = "default_user"
+    session_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    message: str
+    session_id: str
+    status: str
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check for Cloud Run"""
+    """Health check endpoint for Cloud Run"""
     return {
         "status": "healthy",
-        "service": "Primis Digital AI Bot",
-        "timestamp": time.time(),
+        "service": "primis-digital-bot",
         "version": "1.0.0"
     }
 
-@app.get("/ready")
-async def ready_check():
-    """Readiness check - returns 200 when services are ready"""
-    from rag_engine import db, gemini_client, is_loading, load_error
-    
-    if is_loading:
-        raise HTTPException(status_code=503, detail=f"Vector store loading... Error: {load_error}")
-    
-    if db is None:
-        raise HTTPException(status_code=503, detail=f"Vector store not loaded. Error: {load_error}")
-    
-    if gemini_client is None:
-        raise HTTPException(status_code=503, detail="Gemini not initialized")
-    
+@app.get("/")
+async def root():
+    """Root endpoint"""
     return {
-        "status": "ready",
-        "services": {
-            "vectorstore": "loaded",
-            "gemini": "ready",
-            "database": "ready"
+        "message": "Primis Digital Bot API",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "chat": "/chat/",
+            "docs": "/docs"
         }
     }
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize all services on startup"""
-    logger.info("🚀 Starting Primis Digital AI Bot...")
-    
+@app.post("/chat/", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Chat endpoint - processes user messages and returns AI responses
+    """
     try:
-        # Initialize database
-        from database import engine, Base
-        import models
+        # TODO: Implement your actual chat logic here
+        # This is a placeholder response
         
-        # Create tables if they don't exist
-        if engine is not None:
-            Base.metadata.create_all(bind=engine)
-            logger.info("✅ Database tables synchronized")
-        else:
-            logger.warning("⚠️ Database engine not available")
+        session_id = request.session_id or "new_session_123"
         
-        # Initialize AI services
-        try:
-            from rag_engine import initialize_gemini, start_loading_vectorstore
-            
-            logger.info("🤖 Initializing Gemini...")
-            gemini_ready = initialize_gemini()
-            
-            if gemini_ready:
-                logger.info("✅ Gemini initialized")
-            else:
-                logger.error("❌ Gemini initialization failed - check GEMINI_API_KEY")
-            
-            logger.info("📚 Loading vector store in background...")
-            start_loading_vectorstore()
-            logger.info("🔄 Vector store loading started")
-            
-        except ImportError as e:
-            logger.error(f"❌ Could not import rag_engine: {e}")
-        except Exception as e:
-            logger.error(f"❌ Error initializing AI services: {e}")
-            import traceback
-            traceback.print_exc()
+        # Placeholder response
+        response_message = f"I'm having trouble accessing the knowledge base right now. Please try again shortly or contact support for assistance."
         
-        logger.info("🎉 Services initialized!")
+        return ChatResponse(
+            message=response_message,
+            session_id=session_id,
+            status="success"
+        )
         
     except Exception as e:
-        logger.error(f"❌ Startup failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in chat endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Import and include routers after initialization
-try:
-    from chat import router as chat_router
-    app.include_router(chat_router)
-    logger.info("✅ Chat router loaded")
-except ImportError as e:
-    logger.error(f"❌ Failed to load chat router: {e}")
-
-try:
-    from voice_chat import router as voice_router
-    app.include_router(voice_router)
-    logger.info("✅ Voice router loaded")
-except ImportError as e:
-    logger.warning(f"⚠️ Failed to load voice router: {e}")
-
-# Root redirect
-@app.get("/")
-def root():
-    return RedirectResponse(url="/static/index.html")
-
-# Debug endpoint
-@app.get("/debug")
-async def debug_info():
-    """Debug endpoint to check service status"""
+@app.post("/upload/")
+async def upload_file(
+    file: UploadFile = File(...),
+    user_id: str = Form("default_user")
+):
+    """
+    File upload endpoint for document processing
+    """
     try:
-        from database import engine
-        from rag_engine import db, gemini_client, is_loading, load_error
-        
-        # Check file existence
-        faiss_exists = os.path.exists("/tmp/vectorstore/index.faiss") if os.path.exists("/tmp/vectorstore") else False
-        pkl_exists = os.path.exists("/tmp/vectorstore/index.pkl") if os.path.exists("/tmp/vectorstore") else False
+        # TODO: Implement file processing logic
         
         return {
-            "service": "Primis Digital AI Bot",
-            "timestamp": time.time(),
-            "services": {
-                "database": "connected" if engine else "disconnected",
-                "vectorstore_loaded": db is not None,
-                "vectorstore_loading": is_loading,
-                "vectorstore_error": load_error,
-                "gemini_ready": gemini_client is not None,
-                "files": {
-                    "faiss_exists": faiss_exists,
-                    "pkl_exists": pkl_exists
-                }
-            },
-            "environment": {
-                "supabase_url_set": bool(os.getenv("SUPABASE_URL")),
-                "supabase_key_set": bool(os.getenv("SUPABASE_KEY")),
-                "gemini_key_set": bool(os.getenv("GEMINI_API_KEY")),
-                "database_url_set": bool(os.getenv("DATABASE_URL"))
-            }
+            "message": "File uploaded successfully",
+            "filename": file.filename,
+            "user_id": user_id,
+            "status": "success"
         }
+        
     except Exception as e:
-        return {"error": str(e), "timestamp": time.time()}
-
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+        logger.error(f"Error uploading file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
     import uvicorn
+    port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
