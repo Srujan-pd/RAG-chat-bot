@@ -25,7 +25,7 @@ langchain-community==0.0.16
 langchain-google-genai==0.0.6
 
 # Utilities
-httpx==0.26.0
+httpx==0.25.2
 aiofiles==23.2.1
 requests==2.31.0
 
