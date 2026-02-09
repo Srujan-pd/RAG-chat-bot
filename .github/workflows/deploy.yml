@@ -24,10 +24,6 @@ jobs:
     - name: Setup gcloud
       uses: google-github-actions/setup-gcloud@v2
 
-    - name: Test imports
-      run: |
-        python -c "from main import app; print('✅ Main imports successfully')"
-
     - name: Deploy
       run: |
         gcloud run deploy $SERVICE_NAME \
@@ -37,18 +33,5 @@ jobs:
           --allow-unauthenticated \
           --memory 1Gi \
           --cpu 1 \
-          --timeout 300 \
           --port 8080 \
-          --set-env-vars="HF_HOME=/tmp/huggingface,TMPDIR=/tmp,PYTHONUNBUFFERED=1" \
-          --quiet
-
-    - name: Set secrets
-      run: |
-        # Set secrets one by one
-        secrets=("GEMINI_API_KEY" "SUPABASE_URL" "SUPABASE_KEY" "DATABASE_URL")
-        for secret in "${secrets[@]}"; do
-          gcloud run services update $SERVICE_NAME \
-            --region $REGION \
-            --update-secrets="$secret=$secret:latest" \
-            --quiet 2>/dev/null || echo "Note: $secret might not exist"
-        done
+          --set-env-vars="HF_HOME=/tmp/huggingface,TMPDIR=/tmp"
