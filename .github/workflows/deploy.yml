@@ -39,31 +39,6 @@ jobs:
         run: |
           gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
-      - name: Create .env file for Docker build
-        run: |
-          echo "Creating .env file for Docker build..."
-          cat > .env << EOF
-          # Database Configuration
-          DATABASE_URL=${{ secrets.DATABASE_URL }}
-          
-          # Gemini API Configuration
-          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
-          
-          # Supabase Configuration
-          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
-          SUPABASE_BUCKET_NAME=vectorstore-bucket
-          
-          # Application Configuration
-          PORT=8080
-          HF_HOME=/app/.cache/huggingface
-          TRANSFORMERS_CACHE=/app/.cache/huggingface/models
-          HF_HUB_ENABLE_HF_TRANSFER=1
-          EOF
-          
-          # Don't show secrets in logs
-          echo ".env file created (secrets hidden)"
-
       - name: Build and Push Docker Image
         id: build-image
         run: |
@@ -78,7 +53,7 @@ jobs:
             -t ${IMAGE_NAME} .
           
           echo "📤 Pushing Docker image..."
-          docker push ${IMAGE_NAME}
+          docker push ${IMAGE_NAME})
           
           echo "image=${IMAGE_NAME}" >> $GITHUB_OUTPUT
 
@@ -100,7 +75,6 @@ jobs:
             --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
             --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
             --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-            --set-env-vars "PORT=8080" \
             --set-env-vars "HF_HOME=/app/.cache/huggingface" \
             --set-env-vars "TRANSFORMERS_CACHE=/app/.cache/huggingface/models" \
             --set-env-vars "HF_HUB_ENABLE_HF_TRANSFER=1" \
@@ -108,10 +82,9 @@ jobs:
             --update-labels "commit-sha=${{ github.sha }}" \
             --no-traffic
 
-      - name: Verify Deployment
+      - name: Wait for Service to be Ready
         run: |
-          echo "✅ Deployment completed!"
-          echo "Waiting 30 seconds for service to start..."
+          echo "⏳ Waiting for service to be ready..."
           sleep 30
           
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
@@ -119,25 +92,57 @@ jobs:
             --format 'value(status.url)')
           
           echo "Service URL: ${SERVICE_URL}"
-          
-          # Test health endpoint
-          echo "Testing health endpoint..."
-          curl -f --retry 5 --retry-delay 10 ${SERVICE_URL}/health || echo "Health check failed initially, this is normal during warmup"
-          
-          # Test readiness endpoint
-          echo "Testing readiness endpoint..."
-          curl -f --retry 5 --retry-delay 10 ${SERVICE_URL}/ready || echo "Readiness check failed initially, this is normal during warmup"
 
-      - name: Send Deployment Notification (Optional)
-        if: always()
+      - name: Verify Deployment
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
-            --format 'value(status.url)' 2>/dev/null || echo "Service not available")
+            --format 'value(status.url)')
           
+          echo "🧪 Testing deployment..."
+          
+          # Test with retries
+          for i in {1..10}; do
+            echo "Attempt $i/10..."
+            if curl -f -s -o /dev/null -w "HTTP %{http_code}" --max-time 30 ${SERVICE_URL}/ready; then
+              echo "✅ Service is responding!"
+              
+              # Test health endpoint
+              echo "Testing health endpoint..."
+              curl -s ${SERVICE_URL}/health | jq -r '.status' || echo "Health check response"
+              
+              # Test rag-status endpoint
+              echo "Testing RAG status..."
+              curl -s ${SERVICE_URL}/rag-status | jq -r '.rag_initialized' || echo "RAG status response"
+              
+              break
+            else
+              echo "Service not ready yet, waiting..."
+              sleep 10
+            fi
+          done
+
+      - name: Show Deployment Summary
+        if: always()
+        run: |
           echo "📢 Deployment Summary:"
           echo "Project: ${{ env.PROJECT_ID }}"
           echo "Service: ${{ env.SERVICE_NAME }}"
           echo "Region: ${{ env.REGION }}"
           echo "Commit: ${{ github.sha }}"
+          
+          # Try to get service URL
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)' 2>/dev/null || echo "Could not retrieve service URL")
+          
           echo "URL: ${SERVICE_URL}"
+          
+          if [ "${SERVICE_URL}" != "Could not retrieve service URL" ]; then
+            echo "📋 Endpoints:"
+            echo "  - Health: ${SERVICE_URL}/health"
+            echo "  - Ready: ${SERVICE_URL}/ready"
+            echo "  - RAG Status: ${SERVICE_URL}/rag-status"
+            echo "  - Chat: ${SERVICE_URL}/chat/"
+            echo "  - Docs: ${SERVICE_URL}/docs"
+          fi

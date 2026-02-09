@@ -13,7 +13,7 @@ ARG SUPABASE_KEY
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8080 \
+    # Cloud Run will set PORT automatically
     HF_HOME=/app/.cache/huggingface \
     TRANSFORMERS_CACHE=/app/.cache/huggingface/models \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
@@ -54,7 +54,7 @@ RUN mkdir -p /app/.cache/huggingface && chmod -R 777 /app/.cache
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port
+# Expose port (Cloud Run expects 8080)
 EXPOSE 8080
 
 # Health check with longer timeout
@@ -62,4 +62,5 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8080/ready', timeout=10)"
 
 # Run the application
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --log-level info
+# PORT is set automatically by Cloud Run
+CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --log-level info
