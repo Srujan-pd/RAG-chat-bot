@@ -5,51 +5,48 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set!")
-    raise ValueError("DATABASE_URL environment variable is not set!")
-
-logger.info(f"Database URL configured: {DATABASE_URL[:30]}...")
-
-# Create engine with connection pooling
-try:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-        pool_recycle=1800,  # Recycle connections every 30 minutes
-        echo=False
-    )
-    
-    # Test connection
-    with engine.connect() as connection:
-        logger.info("✅ Database connected successfully!")
-    
-    SessionLocal = sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=engine
-    )
-    
-    Base = declarative_base()
-    
-except Exception as e:
-    logger.error(f"❌ Database connection failed: {e}")
-    # Create fallback objects to prevent crashes
     engine = None
     SessionLocal = None
     Base = None
+else:
+    try:
+        logger.info("Initializing database connection...")
+        
+        engine = create_engine(
+            DATABASE_URL,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            echo=False
+        )
+        
+        # Test connection
+        with engine.connect() as connection:
+            logger.info("✅ Database connected successfully")
+        
+        SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=engine
+        )
+        
+        Base = declarative_base()
+        
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {e}")
+        engine = None
+        SessionLocal = None
+        Base = None
 
 
 def get_db():
