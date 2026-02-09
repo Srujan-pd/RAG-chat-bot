@@ -5,12 +5,15 @@ from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Chat
-from google import genai
+
+# CORRECT IMPORT for google-generativeai package
+import google.generativeai as genai
 
 router = APIRouter()
 
-# Initialize Gemini client
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize Gemini with correct method
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 def get_db():
     db = SessionLocal()
@@ -85,12 +88,8 @@ async def chat_main_chat(
         # Build prompt with chat history
         prompt = build_prompt(db, session_id, text)
 
-        # Get AI response from Gemini
-        gemini_response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=prompt
-        )
-
+        # Get AI response from Gemini using correct API
+        gemini_response = model.generate_content(prompt)
         ai_text = gemini_response.text
 
         # Save to database

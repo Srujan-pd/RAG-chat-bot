@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Chat
-from google import genai
-from google.genai import types
+
+# CORRECT IMPORT for google-generativeai package
+import google.generativeai as genai
 
 # Only import TTS if available
 try:
@@ -25,8 +26,10 @@ def get_db():
     finally:
         db.close()
 
-# Initialize Gemini client
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-2.0-flash-exp")
+
 tts_client = None
 
 def get_tts_client():
@@ -79,7 +82,8 @@ async def voice_chat(
         }
     
     try:
-        # Use Gemini to transcribe and respond to audio
+        # Use Gemini to transcribe and respond to audio using multimodal capabilities
+        # Note: For Gemini 2.0, we need to use the correct upload method
         prompt = """You are analyzing audio input. Your task is to:
 1. Transcribe what the user said
 2. Provide a helpful support response
@@ -91,15 +95,15 @@ AI_RESPONSE: [your helpful response here]
 If there is no clear speech or only silence/noise, respond with:
 SILENCE_DETECTED"""
 
-        model_res = gemini_client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=audio_bytes, mime_type=file.content_type)
-            ]
+        # Upload audio file to Gemini
+        audio_file = genai.upload_file(
+            path=file.filename if hasattr(file, 'filename') else "audio.wav",
+            mime_type=file.content_type
         )
-
-        full_text = model_res.text.strip()
+        
+        # Generate response with audio
+        gemini_response = model.generate_content([prompt, audio_file])
+        full_text = gemini_response.text.strip()
         
         # Check for silence detection
         if "SILENCE_DETECTED" in full_text or full_text.upper() == "SILENCE_DETECTED":
