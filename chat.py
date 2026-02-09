@@ -1,12 +1,25 @@
 from datetime import datetime, timedelta
 import os, uuid
+import logging
 from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
-from database import get_db as get_db_dependency  # Rename import to avoid conflict
+from database import SessionLocal
 from models import Chat
-from rag_engine import get_answer
+from rag_engine import get_answer, is_vectorstore_ready
 
 router = APIRouter(prefix="/chat")
+logger = logging.getLogger(__name__)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        raise
+    finally:
+        db.close()
+
 
 # SESSION HANDLER
 def get_or_create_session(request: Request, response: Response):
@@ -22,38 +35,6 @@ def get_or_create_session(request: Request, response: Response):
         )
     return session_id
 
-# LOAD CHAT HISTORY FOR CONTEXT
-def build_prompt(db, session_id, user_message, context_limit=10):
-    """
-    Build prompt with recent chat history for context.
-    context_limit: Number of recent exchanges to include (default 10)
-    """
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-
-    chats = (
-        db.query(Chat)
-        .filter(
-            Chat.session_id == session_id,
-            Chat.created_at >= seven_days_ago
-        )
-        .order_by(Chat.created_at.desc())
-        .limit(context_limit)
-        .all()
-    )
-
-    # Reverse to get chronological order
-    chats = list(reversed(chats))
-
-    if chats:
-        prompt = "You are a helpful support AI assistant. Previous conversation:\n\n"
-        for chat in chats:
-            prompt += f"User: {chat.question}\n"
-            prompt += f"Assistant: {chat.answer}\n\n"
-        prompt += f"User: {user_message}\nAssistant:"
-    else:
-        prompt = f"You are a helpful support AI assistant.\n\nUser: {user_message}\nAssistant:"
-
-    return prompt
 
 @router.post("/")
 async def chat_main(
@@ -61,17 +42,28 @@ async def chat_main(
     response: Response,
     text: str = Form(...),
     user_id: str = Form("default_user"),
-    db: Session = Depends(get_db_dependency)  # Use the renamed import
+    db: Session = Depends(get_db)
 ):
     """
     Main chat endpoint - accepts form data
     Uses RAG to answer from website content
     """
     try:
+        # Check if vector store is ready
+        if not is_vectorstore_ready():
+            raise HTTPException(
+                status_code=503,
+                detail="Knowledge base is still loading. Please try again in a moment."
+            )
+        
         session_id = get_or_create_session(request, response)
 
         # Get AI response using RAG
-        ai_text = get_answer(text)
+        ai_text = get_answer(
+            question=text,
+            session_id=session_id,
+            db_session=db
+        )
 
         # Save to database
         new_chat = Chat(
@@ -91,14 +83,14 @@ async def chat_main(
             "status": "success"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print("❌ Error:", str(e))
-        # Don't rollback if db is None
-        if db is not None:
-            try:
-                db.rollback()
-            except:
-                pass
+        logger.error(f"Chat error: {str(e)}")
+        try:
+            db.rollback()
+        except:
+            pass
         raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
 
 
@@ -106,7 +98,7 @@ async def chat_main(
 async def get_chat_history(
     user_id: str,
     request: Request,
-    db: Session = Depends(get_db_dependency),  # Use the renamed import
+    db: Session = Depends(get_db),
     limit: int = 50
 ):
     """
@@ -143,5 +135,5 @@ async def get_chat_history(
         ]
 
     except Exception as e:
-        print("❌ History Error:", str(e))
+        logger.error(f"History error: {str(e)}")
         return []
