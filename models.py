@@ -1,14 +1,13 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime
-from sqlalchemy.sql import func
 from database import Base
+from datetime import datetime
 
 class Chat(Base):
-    """Chat history model for support conversations"""
-    __tablename__ = "chats"
-    
+    __tablename__ = "chats_info"
+
     id = Column(Integer, primary_key=True, index=True)
-    session_id = Column(String(100), nullable=False, index=True)
-    user_id = Column(String(100), nullable=False, index=True)
+    session_id = Column(String(100), index=True)
+    user_id = Column(String(36), index=True, nullable=False)
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -1,30 +1,46 @@
+import os
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
 
-# Get database URL from environment variable
+# Load environment variables
+load_dotenv()
+
+# Get DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set")
+print(f"👉 DATABASE_URL = {DATABASE_URL}")
+print(f"👉 URL repr = {repr(DATABASE_URL)}")
+print(f"👉 '..' in URL? {'..' in DATABASE_URL}")
 
-# SQLAlchemy engine
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,  # Verify connections before using
-    pool_size=5,
-    max_overflow=10
-)
-
-# Session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base class for models
+# IMPORTANT: Do not modify the URL in any way
+# Create engine and other objects
+engine = None
+SessionLocal = None
 Base = declarative_base()
 
-# Dependency for FastAPI
+try:
+    # Direct creation without modifications
+    engine = create_engine(DATABASE_URL)
+    
+    # Test the connection
+    with engine.connect() as connection:
+        print("✅ Database connected successfully!")
+    
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+except Exception as e:
+    print(f"⚠️ Database connection failed: {e}")
+    import traceback
+    traceback.print_exc()
+    engine = None
+    SessionLocal = None
+
 def get_db():
+    if SessionLocal is None:
+        yield None
+        return
     db = SessionLocal()
     try:
         yield db
