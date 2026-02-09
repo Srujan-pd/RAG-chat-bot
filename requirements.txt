@@ -18,7 +18,6 @@ google-generativeai==0.8.6
 
 # SUPABASE
 supabase==2.27.3
-httpx==0.28.1
 
 # UTILITIES
 pydantic==2.12.5

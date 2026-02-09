@@ -32,6 +32,8 @@ jobs:
 
       - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: '>= 470.0.0'
 
       - name: 🏗️ Build Docker Image
         id: build
