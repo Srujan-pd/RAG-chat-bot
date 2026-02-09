@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 env:
   PROJECT_ID: poc-genai-chatbot
@@ -13,108 +12,34 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to Cloud Run
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    permissions:
-      contents: read
-      id-token: write
-
+    
     steps:
-      - name: 📥 Checkout code
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔐 Authenticate to Google Cloud
+      - name: 🔐 Google Auth
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: ☁️ Set up Cloud SDK
+      - name: ☁️ Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          version: '>= 470.0.0'
 
-      - name: 🏗️ Build Docker Image
-        id: build
-        continue-on-error: false
+      - name: 🏗️ Build & Deploy
         run: |
-          # Build with retry
-          for i in {1..3}; do
-            echo "Attempt $i/3 to build Docker image..."
-            if gcloud builds submit \
-              --tag us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME:${{ github.sha }} \
-              --timeout=600s \
-              --machine-type=e2-highcpu-8 \
-              --disk-size=50; then
-              echo "✅ Build successful on attempt $i"
-              break
-            elif [ $i -eq 3 ]; then
-              echo "❌ All build attempts failed"
-              exit 1
-            else
-              echo "⚠️ Build attempt $i failed, retrying..."
-              sleep 10
-            fi
-          done
-
-      - name: 🚀 Deploy to Cloud Run
-        run: |
-          # Deploy with minimal config first
+          # Build and deploy in one go (simplest)
           gcloud run deploy $SERVICE_NAME \
-            --image us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME:${{ github.sha }} \
+            --source . \
             --region $REGION \
             --platform managed \
             --allow-unauthenticated \
             --memory 2Gi \
             --cpu 1 \
             --timeout 300 \
-            --min-instances 0 \
-            --max-instances 3 \
             --port 8080 \
-            --quiet
-          
-          # Update environment variables
-          gcloud run services update $SERVICE_NAME \
-            --region $REGION \
-            --update-env-vars="HF_HOME=/app/.cache/huggingface,TMPDIR=/tmp,PYTHONUNBUFFERED=1" \
-            --quiet
-          
-          # Update secrets (if they exist)
-          for secret in GEMINI_API_KEY SUPABASE_URL SUPABASE_KEY DATABASE_URL; do
-            echo "Setting secret: $secret"
-            gcloud run services update $SERVICE_NAME \
-              --region $REGION \
-              --update-secrets="$secret=$secret:latest" \
-              --quiet || echo "Warning: Could not set secret $secret"
-          done
-
-      - name: ✅ Verify Deployment
-        run: |
-          # Get service URL
-          SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
-            --region $REGION \
-            --format='value(status.url)' \
-            --quiet)
-          
-          echo "Service URL: $SERVICE_URL"
-          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
-          
-          # Wait for service to be ready
-          echo "Waiting for service to be ready..."
-          for i in {1..30}; do
-            if curl -s -f "$SERVICE_URL/health" > /dev/null; then
-              echo "✅ Service is healthy!"
-              break
-            fi
-            echo "Attempt $i/30: Service not ready yet..."
-            sleep 5
-          done
-          
-          # Final health check
-          curl -f "$SERVICE_URL/health" || exit 1
-          
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🎉 Deployment successful!"
-          echo "Service URL: $SERVICE_URL"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            --update-env-vars="HF_HOME=/tmp/huggingface,TMPDIR=/tmp" \
+            --update-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
+            --update-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+            --update-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+            --update-secrets="DATABASE_URL=DATABASE_URL:latest"
