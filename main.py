@@ -3,11 +3,9 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 from chat import router as chat_router
-from voice_chat import router as voice_router
 from rag_engine import start_loading_vectorstore, initialize_gemini
 
 # App Initialization
@@ -49,8 +47,8 @@ async def startup_tasks():
     logger.info("🚀 Starting Support AI Bot...")
     
     # Set HuggingFace cache directory
-    os.environ["HF_HOME"] = "/app/.cache/huggingface"
-    os.makedirs("/app/.cache/huggingface", exist_ok=True)
+    os.environ["HF_HOME"] = "/tmp/huggingface"
+    os.makedirs("/tmp/huggingface", exist_ok=True)
     
     # Initialize Gemini
     logger.info("🔧 Initializing Gemini...")
@@ -72,17 +70,26 @@ async def startup_tasks():
 
 # Routers
 app.include_router(chat_router)
-app.include_router(voice_router)
 
-# Root Redirect
+# Conditionally include voice_chat if available
+try:
+    from voice_chat import router as voice_router
+    app.include_router(voice_router)
+    logger.info("✅ Voice chat router included")
+except ImportError:
+    logger.info("ℹ️ Voice chat router not found - skipping")
+except Exception as e:
+    logger.error(f"⚠️ Error loading voice chat: {e}")
+
+# Root endpoint
 @app.get("/")
 def root():
-    return RedirectResponse(url="/static/index.html")
-
-# Static Files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Favicon handler
-@app.get("/favicon.ico")
-async def favicon():
-    return RedirectResponse(url="/static/favicon.ico")
+    return {
+        "message": "Support AI Bot API", 
+        "status": "running", 
+        "docs": "/docs",
+        "endpoints": {
+            "chat": "/chat",
+            "health": "/health"
+        }
+    }
