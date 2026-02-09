@@ -53,6 +53,7 @@ async def startup():
         Base.metadata.create_all(bind=engine)
         logger.info("✅ Database initialized")
     except Exception as e:
+<<<<<<< HEAD
         logger.error(f"⚠️ Database init error: {e}")
     
     # Initialize RAG system
@@ -63,3 +64,22 @@ async def startup():
         logger.info("✅ RAG system starting")
     except Exception as e:
         logger.error(f"⚠️ RAG init error: {e}")
+=======
+        logger.error(f"⚠ DB initialization failed: {e}")
+
+
+# Routers
+app.include_router(chat_router)
+app.include_router(voice_router)
+
+
+# Root Redirect
+@app.get("/")
+def root():
+    return RedirectResponse(url="/static/index.html")
+
+
+# Static Files
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+
+>>>>>>> 9903767 (updated file)
