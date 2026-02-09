@@ -4,13 +4,12 @@ on:
   push:
     branches:
       - main
-      - master
-  workflow_dispatch:
 
 env:
   PROJECT_ID: poc-genai-chatbot
   SERVICE_NAME: primis-digital-bot
   REGION: us-central1
+  REPOSITORY: cloud-run-source-deploy
 
 jobs:
   deploy:
@@ -25,124 +24,67 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
-        id: auth
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
-        run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev
 
       - name: Build and Push Docker Image
-        id: build-image
         run: |
-          IMAGE_NAME="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          # Generate image tag
+          COMMIT_SHA=$(echo $GITHUB_SHA | cut -c1-40)
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          IMAGE_NAME="us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${COMMIT_SHA}"
+          IMAGE_LATEST="us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:latest"
           
           echo "🏗️ Building Docker image..."
-          docker build \
-            --build-arg DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --build-arg GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-            --build-arg SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-            --build-arg SUPABASE_KEY="${{ secrets.SUPABASE_KEY }}" \
-            -t ${IMAGE_NAME} .
+          docker build -t ${IMAGE_NAME} -t ${IMAGE_LATEST} .
           
           echo "📤 Pushing Docker image..."
-          docker push ${IMAGE_NAME})
+          docker push ${IMAGE_NAME}
+          docker push ${IMAGE_LATEST}
           
-          echo "image=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
 
       - name: Deploy to Cloud Run
         run: |
-          echo "🚀 Deploying to Cloud Run..."
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ steps.build-image.outputs.image }} \
+            --image ${{ env.IMAGE_NAME }} \
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
             --memory 2Gi \
             --cpu 2 \
-            --timeout 300s \
-            --min-instances 1 \
+            --timeout 900 \
+            --min-instances 0 \
             --max-instances 10 \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
-            --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
-            --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
-            --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
-            --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-            --set-env-vars "HF_HOME=/app/.cache/huggingface" \
-            --set-env-vars "TRANSFORMERS_CACHE=/app/.cache/huggingface/models" \
-            --set-env-vars "HF_HUB_ENABLE_HF_TRANSFER=1" \
             --port 8080 \
-            --update-labels "commit-sha=${{ github.sha }}" \
-            --no-traffic
+            --set-env-vars="PORT=8080,SUPABASE_BUCKET_NAME=vectorstore-bucket" \
+            --update-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,DATABASE_URL=DATABASE_URL:latest"
 
-      - name: Wait for Service to be Ready
-        run: |
-          echo "⏳ Waiting for service to be ready..."
-          sleep 30
-          
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)')
-          
-          echo "Service URL: ${SERVICE_URL}"
-
-      - name: Verify Deployment
+      - name: Get Service URL
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
-            --format 'value(status.url)')
+            --format='value(status.url)')
           
-          echo "🧪 Testing deployment..."
-          
-          # Test with retries
-          for i in {1..10}; do
-            echo "Attempt $i/10..."
-            if curl -f -s -o /dev/null -w "HTTP %{http_code}" --max-time 30 ${SERVICE_URL}/ready; then
-              echo "✅ Service is responding!"
-              
-              # Test health endpoint
-              echo "Testing health endpoint..."
-              curl -s ${SERVICE_URL}/health | jq -r '.status' || echo "Health check response"
-              
-              # Test rag-status endpoint
-              echo "Testing RAG status..."
-              curl -s ${SERVICE_URL}/rag-status | jq -r '.rag_initialized' || echo "RAG status response"
-              
-              break
-            else
-              echo "Service not ready yet, waiting..."
-              sleep 10
-            fi
-          done
+          echo "SERVICE_URL=${SERVICE_URL}" >> $GITHUB_ENV
 
-      - name: Show Deployment Summary
-        if: always()
+      - name: Deployment Summary
         run: |
           echo "📢 Deployment Summary:"
           echo "Project: ${{ env.PROJECT_ID }}"
           echo "Service: ${{ env.SERVICE_NAME }}"
           echo "Region: ${{ env.REGION }}"
-          echo "Commit: ${{ github.sha }}"
-          
-          # Try to get service URL
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)' 2>/dev/null || echo "Could not retrieve service URL")
-          
-          echo "URL: ${SERVICE_URL}"
-          
-          if [ "${SERVICE_URL}" != "Could not retrieve service URL" ]; then
-            echo "📋 Endpoints:"
-            echo "  - Health: ${SERVICE_URL}/health"
-            echo "  - Ready: ${SERVICE_URL}/ready"
-            echo "  - RAG Status: ${SERVICE_URL}/rag-status"
-            echo "  - Chat: ${SERVICE_URL}/chat/"
-            echo "  - Docs: ${SERVICE_URL}/docs"
-          fi
+          echo "Commit: $(echo $GITHUB_SHA | cut -c1-40)"
+          echo "URL: ${{ env.SERVICE_URL }}"
+          echo ""
+          echo "📋 Endpoints:"
+          echo "  - Health: ${{ env.SERVICE_URL }}/health"
+          echo "  - Chat: ${{ env.SERVICE_URL }}/chat/"
+          echo "  - Docs: ${{ env.SERVICE_URL }}/docs"
