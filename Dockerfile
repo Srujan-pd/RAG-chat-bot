@@ -1,43 +1,57 @@
-FROM python:3.11-slim
+# Stage 1: Builder for compiling if needed
+FROM python:3.11-alpine as builder
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install build dependencies
+RUN apk add --no-cache \
     gcc \
     g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+    musl-dev \
+    libffi-dev \
+    openssl-dev \
+    postgresql-dev \
+    make \
+    cmake
 
-# Copy requirements first for better caching
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Create cache directories
-RUN mkdir -p /app/.cache/huggingface /tmp/vectorstore
+# Stage 2: Runtime (ultra-small)
+FROM python:3.11-alpine
+
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apk add --no-cache \
+    libgomp \
+    libstdc++ \
+    postgresql-libs \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Create non-root user
+RUN adduser -D -u 1000 appuser && \
+    mkdir -p /app/.cache/huggingface /tmp/vectorstore && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 # Copy application code
-COPY . .
+COPY --chown=appuser:appuser . .
 
 # Set environment variables
 ENV PORT=8080
-ENV HF_HOME=/app/.cache/huggingface
-ENV TMPDIR=/tmp
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
-
-# Expose port
-EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
-
-# Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+ENV HF_HOME=/app
