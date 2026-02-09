@@ -3,14 +3,24 @@ import os
 import uuid
 from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
-from database import get_db
+from database import SessionLocal
 from models import Chat
-from rag_engine import get_answer
+from google import genai
 
-router = APIRouter(prefix="/chat")
+router = APIRouter()
 
-# SESSION HANDLER
+# Initialize Gemini client
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 def get_or_create_session(request: Request, response: Response):
+    """Get existing session ID or create a new one"""
     session_id = request.cookies.get("session_id")
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -23,25 +33,18 @@ def get_or_create_session(request: Request, response: Response):
         )
     return session_id
 
-# LOAD CHAT HISTORY FOR CONTEXT
-def build_prompt(db, session_id, user_message, context_limit=10):
+def build_prompt(db, session_id, user_message, context_limit=50):
     """
     Build prompt with recent chat history for context.
-    context_limit: Number of recent exchanges to include (default 10)
     """
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-
     chats = (
         db.query(Chat)
-        .filter(
-            Chat.session_id == session_id,
-            Chat.created_at >= seven_days_ago
-        )
+        .filter(Chat.session_id == session_id)
         .order_by(Chat.created_at.desc())
         .limit(context_limit)
         .all()
     )
-
+    
     # Reverse to get chronological order
     chats = list(reversed(chats))
 
@@ -52,22 +55,12 @@ def build_prompt(db, session_id, user_message, context_limit=10):
             prompt += f"Assistant: {chat.answer}\n\n"
         prompt += f"User: {user_message}\nAssistant:"
     else:
-        # First message - add greeting context
-        if user_message.lower().strip() in ["hi", "hello", "hey", "hi there", "hello there", "hey there"]:
-            prompt = """You are a friendly AI assistant for Primis Digital. Start with a warm greeting and introduce yourself briefly. Then ask how you can help.
-
-User: {user_message}
-Assistant:""".format(user_message=user_message)
-        else:
-            prompt = f"""You are a helpful AI assistant for Primis Digital. You provide information about Primis Digital's services, technologies, and projects.
-
-User: {user_message}
-Assistant:"""
+        prompt = f"You are a helpful support AI assistant.\n\nUser: {user_message}\nAssistant:"
 
     return prompt
 
-@router.post("/")
-async def chat_main(
+@router.post("/chat/")
+async def chat_main_chat(
     request: Request,
     response: Response,
     text: str = Form(...),
@@ -76,21 +69,36 @@ async def chat_main(
 ):
     """
     Main chat endpoint - accepts form data
-    Uses RAG to answer from website content
+    
+    Parameters:
+    - text: User's message (required)
+    - user_id: User identifier (default: "default_user")
+    
+    Returns:
+    - message: AI response
+    - session_id: Session identifier
+    - status: Request status
     """
     try:
         session_id = get_or_create_session(request, response)
 
-        # Get AI response using RAG
-        ai_text = get_answer(text)
+        # Build prompt with chat history
+        prompt = build_prompt(db, session_id, text)
+
+        # Get AI response from Gemini
+        gemini_response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=prompt
+        )
+
+        ai_text = gemini_response.text
 
         # Save to database
         new_chat = Chat(
             session_id=session_id,
             user_id=user_id,
             question=text,
-            answer=ai_text,
-            created_at=datetime.utcnow()
+            answer=ai_text
         )
         db.add(new_chat)
         db.commit()
@@ -103,50 +111,47 @@ async def chat_main(
         }
 
     except Exception as e:
-        print("❌ Error:", str(e))
+        print(f"❌ Chat Error: {str(e)}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
 
-@router.get("/history/{user_id}")
+
+@router.get("/chat/history")
 async def get_chat_history(
-    user_id: str,
     request: Request,
-    db: Session = Depends(get_db),
-    limit: int = 50
+    db: Session = Depends(get_db)
 ):
     """
     Get chat history for current session
-    Returns array directly so frontend .slice() works
+    
+    Returns list of chat messages from the current session (last 7 days)
     """
     session_id = request.cookies.get("session_id")
     if not session_id:
         return []
-
+    
     seven_days_ago = datetime.utcnow() - timedelta(days=7)
 
-    try:
-        # Get last N messages in chronological order
-        chats = (
-            db.query(Chat)
-            .filter(
-                Chat.session_id == session_id,
-                Chat.created_at >= seven_days_ago
-            )
-            .order_by(Chat.created_at.asc())
-            .limit(limit)
-            .all()
+    # Get messages from last 7 days
+    chats = (
+        db.query(Chat)
+        .filter(
+            Chat.session_id == session_id,
+            Chat.created_at >= seven_days_ago
         )
-
-        return [
-            {
-                "id": chat.id,
-                "question": chat.question,
-                "answer": chat.answer,
-                "created_at": chat.created_at.isoformat() if chat.created_at else None
-            }
-            for chat in chats
-        ]
-
-    except Exception as e:
-        print("❌ History Error:", str(e))
-        return []
+        .order_by(Chat.created_at.desc())
+        .all()
+    )
+    
+    # Reverse to get chronological order (oldest to newest)
+    chats_list = [
+        {
+            "id": chat.id,
+            "question": chat.question,
+            "answer": chat.answer,
+            "created_at": chat.created_at.isoformat()
+        }
+        for chat in reversed(chats)
+    ]
+    
+    return chats_list
