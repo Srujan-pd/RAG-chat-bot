@@ -2,9 +2,10 @@ import os
 import threading
 import traceback
 import logging
-from supabase_manager import SupabaseStorageManager
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+import pickle
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 from google import genai
 from dotenv import load_dotenv
 from models import Chat
@@ -21,7 +22,9 @@ REMOTE_FOLDER = "vectorstore"
 LOCAL_PATH = "/tmp/vectorstore"
 
 # Global variables
-db = None
+embedding_model = None
+faiss_index = None
+chunks = None
 is_loading = True
 gemini_client = None
 
@@ -48,8 +51,8 @@ def initialize_gemini():
 
 
 def load_vectorstore():
-    """Load vector store from Supabase"""
-    global db, is_loading
+    """Load vector store from Supabase - simplified without langchain"""
+    global embedding_model, faiss_index, chunks, is_loading
 
     try:
         logger.info("📥 Starting vector store download...")
@@ -58,6 +61,8 @@ def load_vectorstore():
         os.makedirs(LOCAL_PATH, exist_ok=True)
         os.makedirs("/app/.cache/huggingface", exist_ok=True)
         
+        # Import here to avoid circular imports
+        from supabase_manager import SupabaseStorageManager
         storage = SupabaseStorageManager()
 
         files_to_download = ["index.faiss", "index.pkl"]
@@ -78,25 +83,40 @@ def load_vectorstore():
             else:
                 raise Exception(f"File not found after download: {filename}")
 
-        logger.info("🔧 Initializing embeddings...")
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
+        logger.info("🔧 Loading embedding model...")
+        # Use sentence-transformers directly instead of langchain
+        embedding_model = SentenceTransformer(
+            'sentence-transformers/all-MiniLM-L6-v2',
             cache_folder="/app/.cache/huggingface"
         )
 
         logger.info("📚 Loading FAISS index...")
-        db = FAISS.load_local(
-            LOCAL_PATH,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
+        # Load FAISS directly
+        faiss_index = faiss.read_index(os.path.join(LOCAL_PATH, "index.faiss"))
+        
+        # Load chunks from pickle
+        with open(os.path.join(LOCAL_PATH, "index.pkl"), 'rb') as f:
+            data = pickle.load(f)
+            # Handle different pickle formats
+            if isinstance(data, dict) and 'texts' in data:
+                chunks = data['texts']
+            elif isinstance(data, list):
+                chunks = data
+            else:
+                # Try to extract texts from langchain format
+                chunks = [doc.page_content for doc in data] if hasattr(data[0], 'page_content') else []
 
         # Test the vector store
-        test_results = db.similarity_search("test", k=1)
-        logger.info(f"✅ Vector store loaded! Test search returned {len(test_results)} results")
-
-        if test_results:
-            logger.info(f"📄 Sample content: {test_results[0].page_content[:200]}...")
+        if chunks:
+            test_embedding = embedding_model.encode(["test query"])
+            distances, indices = faiss_index.search(test_embedding, k=1)
+            logger.info(f"✅ Vector store loaded! {len(chunks)} chunks, {faiss_index.ntotal} vectors")
+            
+            if indices[0][0] >= 0:
+                sample = chunks[indices[0][0]][:200]
+                logger.info(f"📄 Sample content: {sample}...")
+        else:
+            logger.warning("⚠️ No chunks loaded from vector store")
 
         is_loading = False
         logger.info("🎉 Vector store ready!")
@@ -105,7 +125,9 @@ def load_vectorstore():
         logger.error(f"❌ Vector store loading failed: {str(e)}")
         logger.error(traceback.format_exc())
         is_loading = False
-        db = None
+        embedding_model = None
+        faiss_index = None
+        chunks = None
 
 
 def start_loading_vectorstore():
@@ -117,10 +139,10 @@ def start_loading_vectorstore():
 
 def get_answer(question, session_id=None, db_session=None):
     """Get answer using RAG system"""
-    global db, gemini_client
+    global embedding_model, faiss_index, chunks, gemini_client
 
     # Check if vector store is loaded
-    if db is None:
+    if faiss_index is None or embedding_model is None:
         logger.warning("Vector store not loaded yet")
         return "The knowledge base is still loading. Please try again in a moment."
 
@@ -135,20 +157,27 @@ def get_answer(question, session_id=None, db_session=None):
                 search_query = rewrite_question(chat_history, question)
                 logger.info(f"🔁 Rewritten query: {search_query}")
 
-        # Search for relevant documents
-        docs = db.similarity_search(search_query, k=4)
+        # Search for relevant documents using FAISS directly
+        query_embedding = embedding_model.encode([search_query])
+        distances, indices = faiss_index.search(query_embedding, k=4)
+        
+        # Get relevant chunks
+        relevant_chunks = []
+        for idx in indices[0]:
+            if idx >= 0 and idx < len(chunks):
+                relevant_chunks.append(chunks[idx])
 
-        if not docs:
+        if not relevant_chunks:
             logger.warning("⚠️ No relevant documents found")
             return (
                 "I couldn't find relevant information in the Primis Digital knowledge base. "
                 "Could you rephrase your question?"
             )
 
-        logger.info(f"📚 Found {len(docs)} relevant documents")
+        logger.info(f"📚 Found {len(relevant_chunks)} relevant documents")
         
         # Prepare context
-        context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+        context = "\n\n---\n\n".join(relevant_chunks)
 
         # Generate answer using Gemini
         prompt = f"""You are a helpful assistant for Primis Digital, a technology company.
@@ -178,7 +207,7 @@ ANSWER:"""
             answer = response.text
         else:
             logger.warning("Gemini client not available, using fallback")
-            answer = "I found relevant information but the AI service is currently unavailable. Here are some key points from our knowledge base:\n\n" + context[:500] + "..."
+            answer = f"I found relevant information. Here are the key points:\n\n{relevant_chunks[0][:500]}..."
 
         logger.info(f"✅ Answer generated: {len(answer)} characters")
         return answer
@@ -186,7 +215,7 @@ ANSWER:"""
     except Exception as e:
         logger.error(f"❌ Error in get_answer: {str(e)}")
         logger.error(traceback.format_exc())
-        return f"I encountered an error while processing your question. Please try again."
+        return "I encountered an error while processing your question. Please try again."
 
 
 def get_recent_messages(db, session_id, limit=5):
@@ -207,7 +236,7 @@ def get_recent_messages(db, session_id, limit=5):
 
 def rewrite_question(chat_history, user_question):
     """Convert follow-up questions into standalone questions"""
-    if not gemini_client:
+    if not gemini_client or not chat_history:
         return user_question
         
     try:
@@ -243,4 +272,4 @@ Rewrite the question clearly:
 
 def is_vectorstore_ready():
     """Check if vector store is loaded and ready"""
-    return db is not None and not is_loading
+    return faiss_index is not None and not is_loading

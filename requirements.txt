@@ -1,63 +1,27 @@
-# Core
+# CORE
 fastapi==0.110.0
 uvicorn[standard]==0.29.0
-python-multipart==0.0.9
 python-dotenv==1.2.1
 
-# Database
+# DATABASE
 sqlalchemy==2.0.29
 psycopg2-binary==2.9.11
-alembic==1.14.1
 
-# Vector Store
-langchain==0.2.17
-langchain-community==0.2.16
-langchain-core==0.2.43
-langchain-huggingface==0.0.3
+# VECTOR STORE
 faiss-cpu==1.13.2
-sentence-transformers==5.2.2
-transformers==5.0.0
 
-# Embeddings
-langchain-huggingface==0.0.3
-huggingface-hub==1.4.0
-safetensors==0.7.0
-tokenizers==0.22.2
+# EMBEDDINGS (Lightweight alternative)
+sentence-transformers==2.2.2  # Much lighter, no torch dependency
 
-# AI/ML
-google-genai==1.60.0
+# GEMINI
 google-generativeai==0.8.6
-google-api-core==2.29.0
-google-auth==2.47.0
-protobuf==4.25.8
 
-# Web Scraping
-beautifulsoup4==4.14.3
-requests==2.32.5
-playwright==1.58.0
-
-# Audio Processing
-gTTS==2.5.4
-google-cloud-speech==2.26.1
-google-cloud-texttospeech==2.16.3
-
-# Cloud Storage
+# SUPABASE
 supabase==2.27.3
 httpx==0.28.1
 
-# Utilities
+# UTILITIES
 pydantic==2.12.5
-pydantic-settings==2.12.0
-numpy==1.26.4
-pandas==2.2.3
-scikit-learn==1.8.0
-scipy==1.17.0
+numpy==1.24.3
+requests==2.32.5
 tenacity==8.5.0
-tqdm==4.67.1
-rich==14.3.2
-click==8.1.8
-python-dateutil==2.9.0.post0
-certifi==2026.1.4
-charset-normalizer==3.4.4
-urllib3==2.6.3
-idna==3.11

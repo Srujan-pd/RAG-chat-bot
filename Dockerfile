@@ -4,40 +4,33 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy requirements
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python packages (use latest faiss-cpu)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    fastapi==0.110.0 \
+    uvicorn[standard]==0.29.0 \
+    python-dotenv==1.2.1 \
+    sqlalchemy==2.0.29 \
+    psycopg2-binary==2.9.11 \
+    google-generativeai==0.8.6 \
+    supabase==2.27.3 \
+    faiss-cpu==1.13.2 \
+    sentence-transformers==2.2.2 \
+    pydantic==2.12.5 \
+    numpy==1.24.3 \
+    requests==2.32.5
 
-# Create cache directories
-RUN mkdir -p /app/.cache/huggingface /tmp/vectorstore
-
-# Copy application code
+# Copy app
 COPY . .
 
-# Set environment variables
+# Set environment
 ENV PORT=8080
-ENV HF_HOME=/app/.cache/huggingface
-ENV TMPDIR=/tmp
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
-
-# Expose port
-EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
-
-# Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+# Run
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

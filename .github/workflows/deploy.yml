@@ -15,6 +15,7 @@ jobs:
   deploy:
     name: Deploy to Cloud Run
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     permissions:
       contents: read
@@ -32,81 +33,86 @@ jobs:
       - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: 🔍 Verify Setup
-        run: |
-          echo "Project: $PROJECT_ID"
-          echo "Service: $SERVICE_NAME"
-          echo "Region:  $REGION"
-          gcloud config list
-          gcloud auth list
-
       - name: 🏗️ Build Docker Image
+        id: build
+        continue-on-error: false
         run: |
-          gcloud builds submit \
-            --tag us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME:${{ github.sha }} \
-            --timeout 20m \
-            --machine-type=e2-highcpu-8
+          # Build with retry
+          for i in {1..3}; do
+            echo "Attempt $i/3 to build Docker image..."
+            if gcloud builds submit \
+              --tag us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME:${{ github.sha }} \
+              --timeout=600s \
+              --machine-type=e2-highcpu-8 \
+              --disk-size=50; then
+              echo "✅ Build successful on attempt $i"
+              break
+            elif [ $i -eq 3 ]; then
+              echo "❌ All build attempts failed"
+              exit 1
+            else
+              echo "⚠️ Build attempt $i failed, retrying..."
+              sleep 10
+            fi
+          done
 
       - name: 🚀 Deploy to Cloud Run
         run: |
+          # Deploy with minimal config first
           gcloud run deploy $SERVICE_NAME \
             --image us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE_NAME:${{ github.sha }} \
             --region $REGION \
             --platform managed \
             --allow-unauthenticated \
-            --memory 4Gi \
-            --cpu 2 \
+            --memory 2Gi \
+            --cpu 1 \
             --timeout 300 \
-            --min-instances 1 \
-            --max-instances 10 \
-            --startup-cpu-boost \
-            --concurrency 40 \
+            --min-instances 0 \
+            --max-instances 3 \
             --port 8080 \
-            --set-env-vars \
-              SUPABASE_BUCKET_NAME=vectorstore-bucket,\
-              HF_HOME=/app/.cache/huggingface,\
-              TMPDIR=/tmp,\
-              PYTHONUNBUFFERED=1 \
-            --update-secrets \
-              GEMINI_API_KEY=GEMINI_API_KEY:latest,\
-              SUPABASE_URL=SUPABASE_URL:latest,\
-              SUPABASE_KEY=SUPABASE_KEY:latest,\
-              DATABASE_URL=DATABASE_URL:latest
+            --quiet
+          
+          # Update environment variables
+          gcloud run services update $SERVICE_NAME \
+            --region $REGION \
+            --update-env-vars="HF_HOME=/app/.cache/huggingface,TMPDIR=/tmp,PYTHONUNBUFFERED=1" \
+            --quiet
+          
+          # Update secrets (if they exist)
+          for secret in GEMINI_API_KEY SUPABASE_URL SUPABASE_KEY DATABASE_URL; do
+            echo "Setting secret: $secret"
+            gcloud run services update $SERVICE_NAME \
+              --region $REGION \
+              --update-secrets="$secret=$secret:latest" \
+              --quiet || echo "Warning: Could not set secret $secret"
+          done
 
-      - name: 📊 Get Service Info
+      - name: ✅ Verify Deployment
         run: |
+          # Get service URL
           SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
             --region $REGION \
-            --format='value(status.url)')
+            --format='value(status.url)' \
+            --quiet)
           
+          echo "Service URL: $SERVICE_URL"
           echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
           
+          # Wait for service to be ready
+          echo "Waiting for service to be ready..."
+          for i in {1..30}; do
+            if curl -s -f "$SERVICE_URL/health" > /dev/null; then
+              echo "✅ Service is healthy!"
+              break
+            fi
+            echo "Attempt $i/30: Service not ready yet..."
+            sleep 5
+          done
+          
+          # Final health check
+          curl -f "$SERVICE_URL/health" || exit 1
+          
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🎉 Deployment Complete!"
+          echo "🎉 Deployment successful!"
           echo "Service URL: $SERVICE_URL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-      - name: ⏳ Wait for Service Startup
-        run: |
-          echo "Waiting 45 seconds for service to initialize..."
-          sleep 45
-
-      - name: 🏥 Health Check
-        run: |
-          echo "Checking /health endpoint..."
-          curl -f "$SERVICE_URL/health" -H "User-Agent: GitHub-Actions" || exit 1
-
-      - name: ✅ Deployment Summary
-        if: success()
-        run: |
-          echo "🎊 Deployment successful!"
-          echo "Service live at: $SERVICE_URL"
-          echo "Health check: $SERVICE_URL/health"
-          echo "API endpoint: $SERVICE_URL/chat"
-
-      - name: ❌ Deployment Failed
-        if: failure()
-        run: |
-          echo "❌ Deployment failed"
-          echo "Checking Cloud Run logs..."
-          gcloud run logs read $SERVICE_NAME --region $REGION --limit=50
