@@ -1,17 +1,25 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import logging
+
 from chat import router as chat_router
 from voice_chat import router as voice_router
-from rag_engine import start_loading_vectorstore, initialize_gemini
+from rag_engine import init_rag
 
-app = FastAPI(title="Primis Digital Chatbot API")
+app = FastAPI(
+    title="Primis Digital Chatbot API",
+    version="1.0.0"
+)
 
+# -------------------------------------------------
+# Logging
+# -------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CORS middleware
+# -------------------------------------------------
+# CORS
+# -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,33 +28,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------------------------------------------------
+# STARTUP (CRITICAL)
+# -------------------------------------------------
 @app.on_event("startup")
-async def startup_event():
-    """Initialize database and RAG system"""
+def startup_event():
     logger.info("🚀 Starting Primis Digital Chatbot...")
-    
-    # Initialize database
+
+    # 1️⃣ Initialize DB
     try:
         from database import engine, Base
-        import models
+        import models  # noqa
         Base.metadata.create_all(bind=engine)
         logger.info("✅ Database tables synchronized")
     except Exception as e:
-        logger.error(f"⚠️  DB initialization failed: {e}")
-    
-    # Initialize RAG system
-    logger.info("🔑 Initializing Gemini and RAG system...")
-    initialize_gemini()
-    start_loading_vectorstore()
+        logger.error(f"❌ DB initialization failed: {e}")
+        raise  # Fail fast (Cloud Run will restart)
 
-# Include routers
+    # 2️⃣ Initialize RAG (BLOCKING & SAFE)
+    try:
+        logger.info("🧠 Initializing RAG system...")
+        init_rag()
+        logger.info("🎉 RAG system ready")
+    except Exception as e:
+        logger.error(f"❌ RAG initialization failed: {e}")
+        raise  # VERY IMPORTANT
+
+# -------------------------------------------------
+# Routers
+# -------------------------------------------------
 app.include_router(chat_router)
 app.include_router(voice_router)
 
-# Root endpoint
+# -------------------------------------------------
+# Root
+# -------------------------------------------------
 @app.get("/")
 def root():
-    """API root endpoint"""
     return {
         "service": "Primis Digital Chatbot API",
         "status": "online",
@@ -55,24 +73,21 @@ def root():
             "health": "/health",
             "chat": "/chat/",
             "voice": "/voice/",
-            "chat_history": "/chat/history/{user_id}"
-        }
+            "chat_history": "/chat/history/{user_id}",
+        },
     }
 
-# Health check endpoint
+# -------------------------------------------------
+# Health (REAL readiness check)
+# -------------------------------------------------
 @app.get("/health")
 def health():
-    """Health check for Cloud Run"""
-    from rag_engine import is_loading, gemini_client
-    
+    from rag_engine import vectorstore, gemini_client, init_error
+
     return {
-        "status": "healthy",
-        "vectorstore_status": "loaded" if not is_loading else "loading",
-        "gemini_initialized": gemini_client is not None
+        "status": "healthy" if vectorstore and gemini_client else "unhealthy",
+        "vectorstore_loaded": vectorstore is not None,
+        "gemini_initialized": gemini_client is not None,
+        "init_error": init_error,
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -1,81 +1,123 @@
-import json
-import os
-from fastapi import FastAPI
-from pydantic import BaseModel
+from datetime import datetime, timedelta
+import uuid
+from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
+from sqlalchemy.orm import Session
 
-app = FastAPI()
+from database import SessionLocal
+from models import Chat
+from rag_engine import get_answer
 
-# ---------------------------
-# Global state
-# ---------------------------
-KB_READY = False
-KNOWLEDGE_DATA = []
+router = APIRouter(prefix="/chat", tags=["Chat"])
 
-DATA_PATH = "data/scraped_data.json"
-
-print("🔥 chat.py loaded")
-
-# ---------------------------
-# Load Knowledge Base (RUNS ON CONTAINER START)
-# ---------------------------
-def load_knowledge_base():
-    global KB_READY, KNOWLEDGE_DATA
-
-    print("🔥 Starting knowledge base load")
-
-    if not os.path.exists(DATA_PATH):
-        print(f"❌ KB file not found at {DATA_PATH}")
-        return
-
+# -------------------------
+# DB dependency
+# -------------------------
+def get_db():
+    db = SessionLocal()
     try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            KNOWLEDGE_DATA = json.load(f)
+        yield db
+    finally:
+        db.close()
 
-        KB_READY = True
-        print(f"✅ KB loaded successfully | Pages: {len(KNOWLEDGE_DATA)}")
+# -------------------------
+# Session handler
+# -------------------------
+def get_or_create_session(request: Request, response: Response):
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            max_age=60 * 60 * 24 * 7,  # 7 days
+            samesite="lax",
+        )
+    return session_id
 
-    except Exception as e:
-        print(f"❌ Failed to load KB: {e}")
-
-
-# 🔥 THIS IS THE KEY LINE (runs in Cloud Run)
-load_knowledge_base()
-
-# ---------------------------
-# Request / Response models
-# ---------------------------
-class ChatRequest(BaseModel):
-    message: str
-    session_id: str | None = None
-
-
-# ---------------------------
+# -------------------------
 # Chat endpoint
-# ---------------------------
-@app.post("/chat/")
-def chat(req: ChatRequest):
+# -------------------------
+@router.post("/")
+async def chat_main(
+    request: Request,
+    response: Response,
+    text: str = Form(...),
+    user_id: str = Form("default_user"),
+    db: Session = Depends(get_db),
+):
+    """
+    Main chat endpoint
+    Uses RAG to answer from website content
+    """
+    try:
+        session_id = get_or_create_session(request, response)
 
-    if not KB_READY:
+        # 🔥 RAG call (vectorstore already loaded at startup)
+        ai_text = get_answer(text)
+
+        # Save chat to DB
+        chat = Chat(
+            session_id=session_id,
+            user_id=user_id,
+            question=text,
+            answer=ai_text,
+            created_at=datetime.utcnow(),
+        )
+        db.add(chat)
+        db.commit()
+        db.refresh(chat)
+
         return {
             "status": "success",
-            "message": "I'm still loading the knowledge base. Please try again in a moment.",
-            "session_id": req.session_id,
+            "message": ai_text,
+            "session_id": session_id,
         }
 
-    user_question = req.message.lower()
+    except Exception as e:
+        print("❌ Chat Error:", str(e))
+        db.rollback()
+        raise HTTPException(status_code=500, detail="AI generation failed")
 
-    # VERY SIMPLE retrieval (replace later with embeddings)
-    for page in KNOWLEDGE_DATA:
-        if user_question in page.get("content", "").lower():
-            return {
-                "status": "success",
-                "message": page["content"][:800],
-                "session_id": req.session_id,
-            }
+# -------------------------
+# Chat history endpoint
+# -------------------------
+@router.get("/history/{user_id}")
+async def get_chat_history(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    """
+    Returns chat history for current session
+    """
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return []
 
-    return {
-        "status": "success",
-        "message": "I couldn’t find that on Primis Digital yet. Can you rephrase?",
-        "session_id": req.session_id,
-    }
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    chats = (
+        db.query(Chat)
+        .filter(
+            Chat.session_id == session_id,
+            Chat.created_at >= seven_days_ago,
+        )
+        .order_by(Chat.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": chat.id,
+            "question": chat.question,
+            "answer": chat.answer,
+            "created_at": chat.created_at.isoformat()
+            if chat.created_at
+            else None,
+        }
+        for chat in chats
+    ]
 
