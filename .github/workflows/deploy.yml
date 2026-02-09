@@ -31,12 +31,15 @@ jobs:
 
       - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: '>= 470.0.0'
 
       - name: 🔍 Verify Setup
         run: |
           echo "Project: $PROJECT_ID"
           echo "Service: $SERVICE_NAME"
-          echo "Region:  $REGION"
+          echo "Region: $REGION"
+          gcloud --version
           gcloud config list
           gcloud auth list
 
@@ -58,38 +61,30 @@ jobs:
             --cpu 2 \
             --timeout 300 \
             --min-instances 1 \
-            --max-instances 10 \
-            --startup-cpu-boost \
+            --cpu-boost \
             --concurrency 40 \
             --port 8080 \
-            --set-env-vars \
-              SUPABASE_BUCKET_NAME=vectorstore-bucket,\
-              HF_HOME=/app/.cache/huggingface,\
-              TMPDIR=/tmp,\
-              PYTHONUNBUFFERED=1 \
-            --update-secrets \
-              GEMINI_API_KEY=GEMINI_API_KEY:latest,\
-              SUPABASE_URL=SUPABASE_URL:latest,\
-              SUPABASE_KEY=SUPABASE_KEY:latest,\
-              DATABASE_URL=DATABASE_URL:latest
+            --set-env-vars="SUPABASE_BUCKET_NAME=vectorstore-bucket,HF_HOME=/app/.cache/huggingface,TMPDIR=/tmp,PYTHONUNBUFFERED=1" \
+            --update-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
+            --update-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+            --update-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+            --update-secrets="DATABASE_URL=DATABASE_URL:latest"
 
       - name: 📊 Get Service Info
         run: |
           SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
             --region $REGION \
             --format='value(status.url)')
-          
+
           echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
-          
+
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🎉 Deployment Complete!"
           echo "Service URL: $SERVICE_URL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: ⏳ Wait for Service Startup
-        run: |
-          echo "Waiting 45 seconds for service to initialize..."
-          sleep 45
+      - name: ⏳ Wait for Service
+        run: sleep 30
 
       - name: 🏥 Health Check
         run: |
@@ -102,11 +97,11 @@ jobs:
           echo "🎊 Deployment successful!"
           echo "Service live at: $SERVICE_URL"
           echo "Health check: $SERVICE_URL/health"
-          echo "API endpoint: $SERVICE_URL/chat"
+          echo "Chat API: $SERVICE_URL/chat"
 
-      - name: ❌ Deployment Failed
+      - name: ❌ Check Deployment Logs on Failure
         if: failure()
         run: |
           echo "❌ Deployment failed"
-          echo "Checking Cloud Run logs..."
-          gcloud run logs read $SERVICE_NAME --region $REGION --limit=50
+          echo "Checking Cloud Run logs for details..."
+          gcloud run services logs read $SERVICE_NAME --region $REGION --limit=50
