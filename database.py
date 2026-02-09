@@ -2,10 +2,11 @@ import os
 import time
 import logging
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text  # Add text import
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
+from typing import Generator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,38 +22,35 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = None
 SessionLocal = None
 Base = declarative_base()
+_initialized = False
 
-def init_database(max_retries=5, retry_delay=3):
+def init_database(max_retries=5, retry_delay=3) -> bool:
     """Initialize database connection with retry logic"""
-    global engine, SessionLocal
+    global engine, SessionLocal, _initialized
     
-    if engine is not None:
-        return engine
+    if _initialized and engine is not None:
+        return True
     
     if not DATABASE_URL:
         logger.error("⚠️ DATABASE_URL not found in environment variables")
-        logger.error("   Current environment variables:")
-        for key in os.environ:
-            if 'DATABASE' in key.upper() or 'POSTGRES' in key.upper():
-                logger.error(f"   {key}: {'SET' if os.getenv(key) else 'NOT SET'}")
-        return None
+        return False
     
     logger.info(f"🔧 Initializing database connection...")
-    logger.info(f"   DATABASE_URL preview: {DATABASE_URL[:50]}...")
     
     for attempt in range(max_retries):
         try:
             # IMPORTANT: Do not modify the URL in any way
             engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
             
-            # Test the connection
+            # Test the connection - Use text() wrapper
             with engine.connect() as connection:
-                result = connection.execute(text("SELECT 1"))
-                logger.info(f"   Connection test: {result.fetchone()}")
+                result = connection.execute(text("SELECT 1"))  # Fixed: added text()
+                logger.info(f"   Connection test successful")
             
             SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            _initialized = True
             logger.info("✅ Database connected successfully!")
-            return engine
+            return True
             
         except Exception as e:
             logger.error(f"⚠️ Database connection failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
@@ -63,22 +61,23 @@ def init_database(max_retries=5, retry_delay=3):
                 logger.error("❌ Database connection failed after all retries")
                 engine = None
                 SessionLocal = None
-                return None
+                _initialized = False
+                return False
 
-# Initialize on import (optional, can be called explicitly)
-# init_database()
-
-def get_db():
+def get_db() -> Generator[Session, None, None]:
     """Dependency for getting database session"""
+    # Try to initialize if not already done
+    if not _initialized:
+        logger.info("Database not initialized, attempting initialization...")
+        if not init_database():
+            logger.error("Database initialization failed, cannot provide session")
+            # Instead of yielding None, raise an exception
+            raise Exception("Database connection not available")
+    
     if SessionLocal is None:
-        # Try to initialize if not already done
-        logger.info("Database session requested but not initialized, attempting initialization...")
-        init_database()
-        
-    if SessionLocal is None:
-        logger.error("Database connection not available after initialization attempt")
-        raise Exception("Database connection not available")
-        
+        logger.error("SessionLocal is None after initialization")
+        raise Exception("Database session factory not available")
+    
     db = SessionLocal()
     try:
         yield db
@@ -88,3 +87,6 @@ def get_db():
         raise
     finally:
         db.close()
+
+# Initialize on import
+init_database()

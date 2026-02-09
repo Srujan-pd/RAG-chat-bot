@@ -1,19 +1,12 @@
 import os, uuid
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
-from database import SessionLocal
+from database import get_db as get_db_dependency  # Rename import to avoid conflict
 from models import Chat
 from google import genai
 from google.genai import types
 
 router = APIRouter(prefix="/voice")
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # Lazy client initialization
 _client = None
@@ -37,7 +30,7 @@ def get_gemini_client():
 async def voice_chat(
     file: UploadFile = File(...), 
     user_id: str = Form("default_user"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_dependency)  # Use the renamed import
 ):
     """
     Voice chat endpoint - accepts audio file
@@ -78,4 +71,10 @@ async def voice_chat(
             "status": "success"
         }
     except Exception as e:
+        # Don't rollback if db is None
+        if db is not None:
+            try:
+                db.rollback()
+            except:
+                pass
         raise HTTPException(status_code=500, detail=str(e))

@@ -4,13 +4,25 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Set build arguments
+ARG DATABASE_URL
+ARG GEMINI_API_KEY
+ARG SUPABASE_URL
+ARG SUPABASE_KEY
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
     HF_HOME=/app/.cache/huggingface \
     TRANSFORMERS_CACHE=/app/.cache/huggingface/models \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    # Pass build args to runtime environment
+    DATABASE_URL=${DATABASE_URL} \
+    GEMINI_API_KEY=${GEMINI_API_KEY} \
+    SUPABASE_URL=${SUPABASE_URL} \
+    SUPABASE_KEY=${SUPABASE_KEY} \
+    SUPABASE_BUCKET_NAME=vectorstore-bucket
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

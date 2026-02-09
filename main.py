@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import datetime
 import time
 import threading
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 
 from chat import router as chat_router
 from voice_chat import router as voice_router
@@ -34,17 +35,22 @@ def init_database_with_retry():
         import models  # noqa - to ensure models are registered
         
         # Initialize database with retry
-        engine = init_database(max_retries=5, retry_delay=2)
-        if engine:
-            Base.metadata.create_all(bind=engine)
-            return True, "Database initialized successfully"
+        db_success = init_database(max_retries=5, retry_delay=2)
+        if db_success:
+            # Get engine after initialization
+            from database import engine
+            if engine:
+                Base.metadata.create_all(bind=engine)
+                return True, "Database initialized successfully"
+            else:
+                return False, "Database engine is None after initialization"
         else:
-            return False, "Database connection failed after retries"
+            return False, "Database initialization failed"
             
     except Exception as e:
         return False, f"Database initialization failed: {str(e)}"
 
-def init_rag_with_timeout(timeout=180):
+def init_rag_with_timeout():
     """Initialize RAG with timeout in background thread"""
     global app_state
     
@@ -64,14 +70,6 @@ def init_rag_with_timeout(timeout=180):
     rag_thread = threading.Thread(target=rag_init_task, daemon=True)
     rag_thread.start()
     app_state["rag_initialization_started"] = True
-    
-    # Wait for completion with timeout (non-blocking for app startup)
-    wait_start = time.time()
-    while time.time() - wait_start < 10:  # Wait only 10 seconds at startup
-        if app_state["rag_initialization_complete"]:
-            break
-        time.sleep(0.5)
-    
     return rag_thread
 
 @asynccontextmanager
@@ -85,6 +83,7 @@ async def lifespan(app: FastAPI):
     
     # Database initialization (blocking)
     try:
+        logger.info("Initializing database...")
         db_success, db_message = init_database_with_retry()
         if db_success:
             app_state["database_ready"] = True
@@ -188,7 +187,9 @@ def health():
             health_status["status"] = "degraded"
         else:
             with engine.connect() as conn:
-                conn.execute("SELECT 1")
+                # Use text() wrapper for SQL expression
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()  # Consume the result
             health_status["components"]["database"] = {
                 "status": "connected",
                 "message": "OK"
@@ -239,14 +240,6 @@ def health():
         }
         health_status["status"] = "degraded"
     
-    # Overall service readiness
-    # The service is considered ready if database is connected
-    # RAG components can be loading in background
-    if health_status["components"].get("database", {}).get("status") != "connected":
-        health_status["ready"] = False
-    else:
-        health_status["ready"] = True
-    
     # Add startup errors if any
     if app_state["startup_errors"]:
         health_status["startup_errors"] = app_state["startup_errors"]
@@ -264,14 +257,15 @@ def ready():
     from rag_engine import is_rag_initialized
     
     # Basic readiness check
-    # Service is ready if database is connected
+    # Service is ready if database is connected (or at least initialized)
     try:
         from database import engine
         if engine is None:
             return {"ready": False, "reason": "Database not initialized"}
         
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            # Use text() wrapper for SQL expression
+            conn.execute(text("SELECT 1"))
         
         # Database is connected, service is ready
         # RAG can load in background
@@ -299,6 +293,38 @@ def alive():
     }
 
 # -----------------------------
+# DATABASE STATUS ENDPOINT
+# -----------------------------
+@app.get("/db-status")
+def db_status():
+    """Check database status"""
+    try:
+        from database import engine, _initialized
+        if engine is None:
+            return {
+                "initialized": _initialized,
+                "engine": "None",
+                "status": "not_initialized"
+            }
+        
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1")).fetchone()
+        
+        return {
+            "initialized": _initialized,
+            "engine": "available",
+            "connection_test": result[0] if result else None,
+            "status": "connected"
+        }
+    except Exception as e:
+        return {
+            "initialized": False,
+            "engine": "error",
+            "error": str(e),
+            "status": "error"
+        }
+
+# -----------------------------
 # RAG STATUS ENDPOINT
 # -----------------------------
 @app.get("/rag-status")
@@ -317,17 +343,85 @@ def rag_status():
     }
 
 # -----------------------------
+# SYSTEM STATUS ENDPOINT
+# -----------------------------
+@app.get("/system-status")
+def system_status():
+    """Get complete system status"""
+    from rag_engine import vectorstore, gemini_client, init_error, is_rag_initialized
+    from database import engine, _initialized
+    
+    db_connected = False
+    if engine is not None:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_connected = True
+        except:
+            db_connected = False
+    
+    return {
+        "application": {
+            "name": "Primis Digital Chatbot API",
+            "version": "1.0.0",
+            "uptime": str(datetime.datetime.utcnow() - app_state["startup_time"]) if app_state["startup_time"] else "unknown",
+            "startup_time": app_state["startup_time"].isoformat() if app_state["startup_time"] else None
+        },
+        "database": {
+            "initialized": _initialized,
+            "connected": db_connected,
+            "engine_available": engine is not None,
+            "ready": app_state["database_ready"]
+        },
+        "rag_system": {
+            "initialized": is_rag_initialized,
+            "vectorstore_loaded": vectorstore is not None,
+            "gemini_initialized": gemini_client is not None,
+            "rag_initialization_started": app_state["rag_initialization_started"],
+            "rag_initialization_complete": app_state["rag_initialization_complete"],
+            "rag_ready": app_state["rag_ready"],
+            "init_error": init_error
+        },
+        "services": {
+            "chat": "available",
+            "voice": "available",
+            "chat_history": "available"
+        },
+        "health": {
+            "overall": "healthy" if (db_connected or not _initialized) and is_rag_initialized else "degraded",
+            "database": "connected" if db_connected else "disconnected",
+            "rag": "ready" if is_rag_initialized else "initializing"
+        }
+    }
+
+# -----------------------------
 # ERROR HANDLERS
 # -----------------------------
 @app.exception_handler(500)
-async def internal_server_error_handler(request, exc):
+async def internal_server_error_handler(request: Request, exc: Exception):
     """Handle 500 errors gracefully"""
     logger.error(f"Internal server error: {exc}")
-    return {
-        "error": "Internal server error",
-        "message": "An unexpected error occurred. Please try again later.",
-        "status_code": 500
-    }
+    return Response(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred. Please try again later.",
+            "status_code": 500
+        }
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle general exceptions"""
+    logger.error(f"Unhandled exception: {exc}")
+    return Response(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": str(exc),
+            "status_code": 500
+        }
+    )
 
 if __name__ == "__main__":
     import uvicorn

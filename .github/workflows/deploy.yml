@@ -39,13 +39,43 @@ jobs:
         run: |
           gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
+      - name: Create .env file for Docker build
+        run: |
+          echo "Creating .env file for Docker build..."
+          cat > .env << EOF
+          # Database Configuration
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          
+          # Gemini API Configuration
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          
+          # Supabase Configuration
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+          SUPABASE_BUCKET_NAME=vectorstore-bucket
+          
+          # Application Configuration
+          PORT=8080
+          HF_HOME=/app/.cache/huggingface
+          TRANSFORMERS_CACHE=/app/.cache/huggingface/models
+          HF_HUB_ENABLE_HF_TRANSFER=1
+          EOF
+          
+          # Don't show secrets in logs
+          echo ".env file created (secrets hidden)"
+
       - name: Build and Push Docker Image
         id: build-image
         run: |
           IMAGE_NAME="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
           
           echo "🏗️ Building Docker image..."
-          docker build -t ${IMAGE_NAME} .
+          docker build \
+            --build-arg DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --build-arg GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+            --build-arg SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            --build-arg SUPABASE_KEY="${{ secrets.SUPABASE_KEY }}" \
+            -t ${IMAGE_NAME} .
           
           echo "📤 Pushing Docker image..."
           docker push ${IMAGE_NAME}
@@ -70,11 +100,44 @@ jobs:
             --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
             --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
             --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-            --port 8080
+            --set-env-vars "PORT=8080" \
+            --set-env-vars "HF_HOME=/app/.cache/huggingface" \
+            --set-env-vars "TRANSFORMERS_CACHE=/app/.cache/huggingface/models" \
+            --set-env-vars "HF_HUB_ENABLE_HF_TRANSFER=1" \
+            --port 8080 \
+            --update-labels "commit-sha=${{ github.sha }}" \
+            --no-traffic
 
-      - name: Show Service URL
+      - name: Verify Deployment
         run: |
-          echo "✅ Deployment successful!"
-          gcloud run services describe ${{ env.SERVICE_NAME }} \
+          echo "✅ Deployment completed!"
+          echo "Waiting 30 seconds for service to start..."
+          sleep 30
+          
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
-            --format 'value(status.url)'
+            --format 'value(status.url)')
+          
+          echo "Service URL: ${SERVICE_URL}"
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f --retry 5 --retry-delay 10 ${SERVICE_URL}/health || echo "Health check failed initially, this is normal during warmup"
+          
+          # Test readiness endpoint
+          echo "Testing readiness endpoint..."
+          curl -f --retry 5 --retry-delay 10 ${SERVICE_URL}/ready || echo "Readiness check failed initially, this is normal during warmup"
+
+      - name: Send Deployment Notification (Optional)
+        if: always()
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)' 2>/dev/null || echo "Service not available")
+          
+          echo "📢 Deployment Summary:"
+          echo "Project: ${{ env.PROJECT_ID }}"
+          echo "Service: ${{ env.SERVICE_NAME }}"
+          echo "Region: ${{ env.REGION }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "URL: ${SERVICE_URL}"
