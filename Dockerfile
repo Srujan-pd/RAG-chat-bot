@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDWRITEBYTECODE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
     HF_HOME=/app/.cache/huggingface \
     TRANSFORMERS_CACHE=/app/.cache/huggingface/models \
@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -29,14 +28,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Pre-download the embedding model during build
 RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; \
+    print('Downloading embeddings model...'); \
     model = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2'); \
-    print('Model downloaded successfully')"
-
-# Create cache directory with proper permissions
-RUN mkdir -p /app/.cache/huggingface && chmod -R 777 /app/.cache
+    print('✅ Embeddings model downloaded')"
 
 # Copy application code
 COPY . .
+
+# Create cache directory with proper permissions
+RUN mkdir -p /app/.cache/huggingface && chmod -R 777 /app/.cache
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
@@ -46,8 +46,8 @@ USER appuser
 EXPOSE 8080
 
 # Health check with longer timeout
-HEALTHCHECK --interval=30s --timeout=30s --start-period=90s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8080/health', timeout=10)"
+HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8080/ready', timeout=10)"
 
 # Run the application
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1
+CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --log-level info

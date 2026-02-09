@@ -2,11 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import datetime
+import time
+import threading
 from contextlib import asynccontextmanager
 
 from chat import router as chat_router
 from voice_chat import router as voice_router
-from rag_engine import init_rag
+from rag_engine import init_rag, is_rag_initialized, init_error
 
 # Configure logging
 logging.basicConfig(
@@ -19,9 +21,58 @@ logger = logging.getLogger(__name__)
 app_state = {
     "database_ready": False,
     "rag_ready": False,
+    "rag_initialization_started": False,
+    "rag_initialization_complete": False,
     "startup_time": None,
     "startup_errors": []
 }
+
+def init_database_with_retry():
+    """Initialize database with retry logic"""
+    try:
+        from database import init_database, Base
+        import models  # noqa - to ensure models are registered
+        
+        # Initialize database with retry
+        engine = init_database(max_retries=5, retry_delay=2)
+        if engine:
+            Base.metadata.create_all(bind=engine)
+            return True, "Database initialized successfully"
+        else:
+            return False, "Database connection failed after retries"
+            
+    except Exception as e:
+        return False, f"Database initialization failed: {str(e)}"
+
+def init_rag_with_timeout(timeout=180):
+    """Initialize RAG with timeout in background thread"""
+    global app_state
+    
+    def rag_init_task():
+        try:
+            logger.info("🧠 Starting RAG initialization...")
+            init_rag()
+            app_state["rag_initialization_complete"] = True
+            app_state["rag_ready"] = True
+            logger.info("🎉 RAG initialization completed successfully")
+        except Exception as e:
+            error_msg = f"RAG initialization failed: {str(e)}"
+            app_state["startup_errors"].append(error_msg)
+            logger.error(f"❌ {error_msg}")
+    
+    # Start RAG initialization in background
+    rag_thread = threading.Thread(target=rag_init_task, daemon=True)
+    rag_thread.start()
+    app_state["rag_initialization_started"] = True
+    
+    # Wait for completion with timeout (non-blocking for app startup)
+    wait_start = time.time()
+    while time.time() - wait_start < 10:  # Wait only 10 seconds at startup
+        if app_state["rag_initialization_complete"]:
+            break
+        time.sleep(0.5)
+    
+    return rag_thread
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,43 +83,29 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting Primis Digital Chatbot...")
     app_state["startup_time"] = datetime.datetime.utcnow()
     
-    # Database initialization
+    # Database initialization (blocking)
     try:
-        from database import init_database, Base
-        import models  # noqa - to ensure models are registered
-        
-        # Initialize database with retry
-        engine = init_database(max_retries=3, retry_delay=2)
-        if engine:
-            Base.metadata.create_all(bind=engine)
+        db_success, db_message = init_database_with_retry()
+        if db_success:
             app_state["database_ready"] = True
-            logger.info("✅ Database initialized successfully")
+            logger.info(f"✅ {db_message}")
         else:
-            error_msg = "Database connection failed after retries"
-            app_state["startup_errors"].append(error_msg)
-            logger.error(f"❌ {error_msg}")
+            app_state["startup_errors"].append(db_message)
+            logger.error(f"❌ {db_message}")
+            # Continue without database - app can still run in degraded mode
             
     except Exception as e:
-        error_msg = f"Database initialization failed: {str(e)}"
+        error_msg = f"Database initialization error: {str(e)}"
         app_state["startup_errors"].append(error_msg)
         logger.exception("❌ Database initialization failed")
     
-    # RAG initialization (non-blocking - starts in background)
-    try:
-        logger.info("🧠 Starting RAG initialization...")
-        # This should be non-blocking or have its own timeout
-        init_rag()
-        app_state["rag_ready"] = True
-        logger.info("🎉 RAG initialization started successfully")
-    except Exception as e:
-        error_msg = f"RAG initialization failed: {str(e)}"
-        app_state["startup_errors"].append(error_msg)
-        logger.exception("❌ RAG initialization failed")
+    # Start RAG initialization in background (non-blocking)
+    init_rag_with_timeout()
     
-    logger.info("✅ Application startup completed")
+    logger.info("✅ Application startup completed - ready to accept requests")
     yield
     
-    # Shutdown (if needed)
+    # Shutdown
     logger.info("👋 Shutting down application...")
 
 app = FastAPI(
@@ -101,13 +138,22 @@ app.include_router(voice_router)
 @app.get("/")
 def root():
     """API root endpoint"""
+    from rag_engine import vectorstore, gemini_client
+    
     return {
         "service": "Primis Digital Chatbot API",
         "status": "online",
         "version": "1.0.0",
         "uptime": str(datetime.datetime.utcnow() - app_state["startup_time"]) if app_state["startup_time"] else "unknown",
+        "components": {
+            "database": app_state["database_ready"],
+            "rag_initialized": is_rag_initialized,
+            "vectorstore_loaded": vectorstore is not None,
+            "gemini_ready": gemini_client is not None
+        },
         "endpoints": {
             "health": "/health",
+            "ready": "/ready",
             "chat": "/chat/",
             "voice": "/voice/",
             "chat_history": "/chat/history/{user_id}",
@@ -167,10 +213,10 @@ def health():
             "message": init_error[:100] if init_error else "Unknown error"
         }
         health_status["status"] = "degraded"
-    elif is_rag_initialized:
+    elif app_state["rag_initialization_started"] and not app_state["rag_initialization_complete"]:
         health_status["components"]["vectorstore"] = {
             "status": "loading",
-            "message": "Vector store is being loaded"
+            "message": "Vector store is being loaded in background"
         }
         # Still considered healthy if loading in background
     else:
@@ -204,7 +250,8 @@ def health():
     # Add startup errors if any
     if app_state["startup_errors"]:
         health_status["startup_errors"] = app_state["startup_errors"]
-        health_status["status"] = "degraded"
+        if health_status["status"] == "healthy":
+            health_status["status"] = "degraded"
     
     return health_status
 
@@ -228,7 +275,12 @@ def ready():
         
         # Database is connected, service is ready
         # RAG can load in background
-        return {"ready": True, "message": "Service is ready"}
+        return {
+            "ready": True, 
+            "message": "Service is ready",
+            "rag_initialized": is_rag_initialized,
+            "rag_loading": app_state["rag_initialization_started"] and not app_state["rag_initialization_complete"]
+        }
         
     except Exception as e:
         return {"ready": False, "reason": f"Database error: {str(e)[:100]}"}
@@ -242,7 +294,26 @@ def alive():
     return {
         "alive": True,
         "timestamp": datetime.datetime.utcnow().isoformat(),
-        "service": "Primis Digital Chatbot API"
+        "service": "Primis Digital Chatbot API",
+        "uptime": str(datetime.datetime.utcnow() - app_state["startup_time"]) if app_state["startup_time"] else "unknown"
+    }
+
+# -----------------------------
+# RAG STATUS ENDPOINT
+# -----------------------------
+@app.get("/rag-status")
+def rag_status():
+    """Check RAG system status"""
+    from rag_engine import vectorstore, gemini_client, init_error, is_rag_initialized
+    
+    return {
+        "rag_initialized": is_rag_initialized,
+        "vectorstore_loaded": vectorstore is not None,
+        "gemini_initialized": gemini_client is not None,
+        "init_error": init_error,
+        "rag_initialization_started": app_state["rag_initialization_started"],
+        "rag_initialization_complete": app_state["rag_initialization_complete"],
+        "rag_ready": app_state["rag_ready"]
     }
 
 # -----------------------------
@@ -262,4 +333,4 @@ if __name__ == "__main__":
     import uvicorn
     import os
     port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
