@@ -1,148 +1,108 @@
-name: Deploy to Cloud Run
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: primis-digital-bot
+  labels:
+    cloud.googleapis.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scaling configuration
+        autoscaling.knative.dev/minScale: '1'
+        autoscaling.knative.dev/maxScale: '10'
+        # Startup CPU boost for faster cold starts
+        run.googleapis.com/startup-cpu-boost: 'true'
+        # CPU allocation - always allocated (not just during request)
+        run.googleapis.com/cpu-throttling: 'false'
+    spec:
+      # Maximum concurrent requests per container
+      containerConcurrency: 80
+      # Request timeout (5 minutes)
+      timeoutSeconds: 300
+      # Service account (update with your service account if needed)
+      # serviceAccountName: your-service-account@your-project.iam.gserviceaccount.com
+      
+      containers:
+      - image: gcr.io/YOUR_PROJECT_ID/primis-digital-bot:latest
+        
+        # Resource limits
+        resources:
+          limits:
+            memory: 2Gi
+            cpu: '2'
+          # Optional: set requests lower than limits for cost optimization
+          # requests:
+          #   memory: 1Gi
+          #   cpu: '1'
+        
+        # Environment variables
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://user:password@host:port/database"
+        - name: GEMINI_API_KEY
+          value: "your-gemini-api-key-here"
+        - name: SUPABASE_URL
+          value: "https://your-project.supabase.co"
+        - name: SUPABASE_KEY
+          value: "your-supabase-anon-key"
+        - name: SUPABASE_BUCKET_NAME
+          value: "vectorstore-bucket"
+        
+        # Alternative: Use secrets for sensitive data (RECOMMENDED)
+        # - name: GEMINI_API_KEY
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: gemini-api-key
+        #       key: latest
+        
+        ports:
+        - name: http1
+          containerPort: 8080
+        
+        # Startup probe - checks if container is ready to accept traffic
+        # This is critical - gives enough time for vector store to load
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+            httpHeaders:
+            - name: User-Agent
+              value: GoogleHC/1.0
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 18  # 180 seconds total (18 * 10s)
+        
+        # Liveness probe - checks if container is still running
+        livenessProbe:
+          httpGet:
+            path: /alive
+            port: 8080
+            httpHeaders:
+            - name: User-Agent
+              value: GoogleHC/1.0
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        # Readiness probe - checks if container can handle requests
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+            httpHeaders:
+            - name: User-Agent
+              value: GoogleHC/1.0
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
 
-on:
-  push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
+  traffic:
+  - percent: 100
+    latestRevision: true
 
-env:
-  PROJECT_ID: poc-genai-chatbot
-  SERVICE_NAME: primis-digital-bot
-  REGION: us-central1
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-
-      - name: Configure Docker for Artifact Registry
-        run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
-
-      - name: Build and Push Docker Image
-        id: build-image
-        run: |
-          IMAGE_NAME="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-          
-          echo "🏗️ Building Docker image..."
-          docker build \
-            --build-arg DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --build-arg GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-            --build-arg SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-            --build-arg SUPABASE_KEY="${{ secrets.SUPABASE_KEY }}" \
-            -t ${IMAGE_NAME} .
-          
-          echo "📤 Pushing Docker image..."
-          docker push ${IMAGE_NAME})
-          
-          echo "image=${IMAGE_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Deploy to Cloud Run
-        run: |
-          echo "🚀 Deploying to Cloud Run..."
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ steps.build-image.outputs.image }} \
-            --region ${{ env.REGION }} \
-            --platform managed \
-            --allow-unauthenticated \
-            --memory 2Gi \
-            --cpu 2 \
-            --timeout 300s \
-            --min-instances 1 \
-            --max-instances 10 \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }}" \
-            --set-env-vars "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
-            --set-env-vars "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
-            --set-env-vars "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
-            --set-env-vars "SUPABASE_BUCKET_NAME=vectorstore-bucket" \
-            --set-env-vars "HF_HOME=/app/.cache/huggingface" \
-            --set-env-vars "TRANSFORMERS_CACHE=/app/.cache/huggingface/models" \
-            --set-env-vars "HF_HUB_ENABLE_HF_TRANSFER=1" \
-            --port 8080 \
-            --update-labels "commit-sha=${{ github.sha }}" \
-            --no-traffic
-
-      - name: Wait for Service to be Ready
-        run: |
-          echo "⏳ Waiting for service to be ready..."
-          sleep 30
-          
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)')
-          
-          echo "Service URL: ${SERVICE_URL}"
-
-      - name: Verify Deployment
-        run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)')
-          
-          echo "🧪 Testing deployment..."
-          
-          # Test with retries
-          for i in {1..10}; do
-            echo "Attempt $i/10..."
-            if curl -f -s -o /dev/null -w "HTTP %{http_code}" --max-time 30 ${SERVICE_URL}/ready; then
-              echo "✅ Service is responding!"
-              
-              # Test health endpoint
-              echo "Testing health endpoint..."
-              curl -s ${SERVICE_URL}/health | jq -r '.status' || echo "Health check response"
-              
-              # Test rag-status endpoint
-              echo "Testing RAG status..."
-              curl -s ${SERVICE_URL}/rag-status | jq -r '.rag_initialized' || echo "RAG status response"
-              
-              break
-            else
-              echo "Service not ready yet, waiting..."
-              sleep 10
-            fi
-          done
-
-      - name: Show Deployment Summary
-        if: always()
-        run: |
-          echo "📢 Deployment Summary:"
-          echo "Project: ${{ env.PROJECT_ID }}"
-          echo "Service: ${{ env.SERVICE_NAME }}"
-          echo "Region: ${{ env.REGION }}"
-          echo "Commit: ${{ github.sha }}"
-          
-          # Try to get service URL
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)' 2>/dev/null || echo "Could not retrieve service URL")
-          
-          echo "URL: ${SERVICE_URL}"
-          
-          if [ "${SERVICE_URL}" != "Could not retrieve service URL" ]; then
-            echo "📋 Endpoints:"
-            echo "  - Health: ${SERVICE_URL}/health"
-            echo "  - Ready: ${SERVICE_URL}/ready"
-            echo "  - RAG Status: ${SERVICE_URL}/rag-status"
-            echo "  - Chat: ${SERVICE_URL}/chat/"
-            echo "  - Docs: ${SERVICE_URL}/docs"
-          fi

@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 BUCKET_NAME = os.getenv("SUPABASE_BUCKET_NAME", "vectorstore-bucket")
 REMOTE_FOLDER = "vectorstore"
 LOCAL_PATH = "/tmp/vectorstore"
-LOCAL_VECTORSTORE_PATH = "vectorstore"  # Local directory for bundled vector store
+LOCAL_VECTORSTORE_PATH = "vectorstore"
 
-# Global variables for external access (needed by main.py)
+# Global variables
 vectorstore = None
 gemini_client = None
 init_error = None
@@ -34,6 +34,7 @@ _is_loading = False
 _loading_error = None
 _last_load_attempt = None
 _load_successful = False
+_load_lock = threading.Lock()  # Add lock to prevent concurrent loads
 
 def initialize_gemini():
     """Initialize Gemini client"""
@@ -62,7 +63,9 @@ def get_embeddings():
     logger.info("🔧 Loading embeddings model...")
     try:
         embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
         )
         logger.info("✅ Embeddings model loaded")
         return embeddings
@@ -157,10 +160,22 @@ def try_load_from_local():
         return None
 
 def load_vectorstore():
-    """Load vector store with fallback strategy"""
-    global _db, _loading_error, vectorstore, _load_successful, _last_load_attempt
+    """Load vector store with fallback strategy - BLOCKING"""
+    global _db, _loading_error, vectorstore, _load_successful, _last_load_attempt, _is_loading
     
-    _last_load_attempt = time.time()
+    # Use lock to prevent concurrent loading
+    with _load_lock:
+        # Check if already loaded
+        if _db is not None:
+            return True
+        
+        # Check if already loading
+        if _is_loading:
+            logger.info("Vector store is already being loaded by another thread")
+            return False
+        
+        _is_loading = True
+        _last_load_attempt = time.time()
     
     try:
         # Try Supabase first
@@ -188,59 +203,15 @@ def load_vectorstore():
     except Exception as e:
         error_msg = f"Vector store loading failed: {str(e)}"
         logger.error(f"❌ {error_msg}")
+        logger.error(traceback.format_exc())
         _loading_error = error_msg
-        init_error = error_msg
         _load_successful = False
         return False
-
-def load_vectorstore_background():
-    """Load vector store in background thread"""
-    global _is_loading
-    
-    def load_task():
-        global _is_loading
-        _is_loading = True
-        try:
-            load_vectorstore()
-        except Exception as e:
-            logger.error(f"Background load failed: {e}")
-        finally:
-            _is_loading = False
-    
-    thread = threading.Thread(target=load_task, daemon=True)
-    thread.start()
-    logger.info("🔄 Vector store loading started in background thread...")
-    return thread
-
-def ensure_vectorstore_loaded():
-    """Ensure vector store is loaded (lazy loading with timeout)"""
-    global _db, _is_loading, _loading_error, _load_successful
-    
-    if _db is not None:
-        return True
-    
-    if _is_loading:
-        # Check if loading is taking too long
-        if _last_load_attempt and (time.time() - _last_load_attempt) > 300:  # 5 minutes
-            logger.warning("Vector store loading is taking too long, retrying...")
-            _is_loading = False
-            return load_vectorstore()
-        
-        logger.info("Vector store is still loading...")
-        return False
-    
-    if _load_successful:
-        return True
-    
-    if _loading_error and (time.time() - _last_load_attempt) < 60:  # Don't retry too soon
-        logger.warning(f"Previous load failed recently: {_loading_error[:100]}")
-        return False
-    
-    # Try to load now
-    return load_vectorstore()
+    finally:
+        _is_loading = False
 
 def init_rag():
-    """Initialize RAG system (called from main.py)"""
+    """Initialize RAG system - EAGER LOADING"""
     global is_rag_initialized, init_error
     
     try:
@@ -251,19 +222,28 @@ def init_rag():
         if not initialize_gemini():
             raise Exception("Failed to initialize Gemini client")
         
-        # Step 2: Start vector store loading in background
-        logger.info("Step 2: Starting vector store loading...")
-        load_vectorstore_background()
+        # Step 2: Load vector store SYNCHRONOUSLY (not in background)
+        logger.info("Step 2: Loading vector store...")
+        start_time = time.time()
         
-        # Mark as initialized (even though loading continues in background)
+        if not load_vectorstore():
+            raise Exception("Failed to load vector store")
+        
+        load_time = time.time() - start_time
+        logger.info(f"✅ Vector store loaded in {load_time:.2f} seconds")
+        
+        # Mark as initialized
         is_rag_initialized = True
-        logger.info("🎉 RAG initialization started successfully")
+        logger.info("🎉 RAG initialization completed successfully")
+        return True
         
     except Exception as e:
         error_msg = f"RAG initialization failed: {str(e)}"
         logger.error(f"❌ {error_msg}")
+        logger.error(traceback.format_exc())
         init_error = error_msg
-        raise
+        is_rag_initialized = False
+        return False
 
 def get_answer(question: str, k: int = 4) -> str:
     """Get answer using RAG with Gemini"""
@@ -272,18 +252,16 @@ def get_answer(question: str, k: int = 4) -> str:
     try:
         # Check Gemini client
         if gemini_client is None:
-            logger.info("Gemini client not initialized, attempting to initialize...")
-            if not initialize_gemini():
-                return "❌ Gemini AI client not initialized. Please contact support."
+            logger.error("Gemini client not initialized")
+            return "❌ AI service unavailable. Please try again later or contact support."
         
-        # Try to load vector store if not loaded
+        # Check vector store
         if _db is None:
-            logger.info("Vector store not loaded, attempting to load...")
-            if not ensure_vectorstore_loaded():
-                if _loading_error:
-                    logger.error(f"Vector store error: {_loading_error}")
-                    return f"❌ Knowledge base unavailable: {_loading_error}"
-                return "I'm still loading the knowledge base. This usually takes 1-2 minutes after startup. Please try again in a moment."
+            logger.error("Vector store not loaded")
+            if _loading_error:
+                logger.error(f"Vector store error: {_loading_error}")
+                return "❌ Knowledge base unavailable. Please contact support."
+            return "❌ Knowledge base is still initializing. Please try again in a moment."
         
         # Search vector store
         logger.info(f"🔍 Searching for: {question}")
@@ -335,9 +313,5 @@ ANSWER:"""
     except Exception as e:
         logger.error(f"❌ Error in get_answer: {str(e)}")
         logger.error(traceback.format_exc())
-        return f"Error generating answer: {str(e)}"
+        return f"❌ Error generating answer: {str(e)}"
 
-# For backward compatibility
-def start_loading_vectorstore():
-    """Alias for backward compatibility"""
-    return load_vectorstore_background()

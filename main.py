@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import datetime
 import time
-import threading
+import sys
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 
@@ -22,10 +22,9 @@ logger = logging.getLogger(__name__)
 app_state = {
     "database_ready": False,
     "rag_ready": False,
-    "rag_initialization_started": False,
-    "rag_initialization_complete": False,
     "startup_time": None,
-    "startup_errors": []
+    "startup_errors": [],
+    "initialization_complete": False
 }
 
 def init_database_with_retry():
@@ -50,28 +49,6 @@ def init_database_with_retry():
     except Exception as e:
         return False, f"Database initialization failed: {str(e)}"
 
-def init_rag_with_timeout():
-    """Initialize RAG with timeout in background thread"""
-    global app_state
-    
-    def rag_init_task():
-        try:
-            logger.info("🧠 Starting RAG initialization...")
-            init_rag()
-            app_state["rag_initialization_complete"] = True
-            app_state["rag_ready"] = True
-            logger.info("🎉 RAG initialization completed successfully")
-        except Exception as e:
-            error_msg = f"RAG initialization failed: {str(e)}"
-            app_state["startup_errors"].append(error_msg)
-            logger.error(f"❌ {error_msg}")
-    
-    # Start RAG initialization in background
-    rag_thread = threading.Thread(target=rag_init_task, daemon=True)
-    rag_thread.start()
-    app_state["rag_initialization_started"] = True
-    return rag_thread
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -83,7 +60,9 @@ async def lifespan(app: FastAPI):
     
     # Database initialization (blocking)
     try:
-        logger.info("Initializing database...")
+        logger.info("=" * 60)
+        logger.info("STEP 1: Initializing database...")
+        logger.info("=" * 60)
         db_success, db_message = init_database_with_retry()
         if db_success:
             app_state["database_ready"] = True
@@ -98,10 +77,41 @@ async def lifespan(app: FastAPI):
         app_state["startup_errors"].append(error_msg)
         logger.exception("❌ Database initialization failed")
     
-    # Start RAG initialization in background (non-blocking)
-    init_rag_with_timeout()
+    # RAG initialization (BLOCKING - wait for it to complete)
+    try:
+        logger.info("=" * 60)
+        logger.info("STEP 2: Initializing RAG system...")
+        logger.info("=" * 60)
+        
+        rag_start = time.time()
+        rag_success = init_rag()
+        rag_time = time.time() - rag_start
+        
+        if rag_success:
+            app_state["rag_ready"] = True
+            logger.info(f"✅ RAG system ready in {rag_time:.2f} seconds")
+        else:
+            error_msg = f"RAG initialization failed: {init_error}"
+            app_state["startup_errors"].append(error_msg)
+            logger.error(f"❌ {error_msg}")
+            # This is critical - exit if RAG fails
+            logger.error("RAG system is required. Exiting...")
+            sys.exit(1)
+            
+    except Exception as e:
+        error_msg = f"RAG initialization error: {str(e)}"
+        app_state["startup_errors"].append(error_msg)
+        logger.exception("❌ RAG initialization failed")
+        sys.exit(1)
     
-    logger.info("✅ Application startup completed - ready to accept requests")
+    app_state["initialization_complete"] = True
+    total_time = time.time() - app_state["startup_time"].timestamp()
+    
+    logger.info("=" * 60)
+    logger.info(f"✅ Application startup completed in {total_time:.2f} seconds")
+    logger.info("Ready to accept requests")
+    logger.info("=" * 60)
+    
     yield
     
     # Shutdown
@@ -148,7 +158,8 @@ def root():
             "database": app_state["database_ready"],
             "rag_initialized": is_rag_initialized,
             "vectorstore_loaded": vectorstore is not None,
-            "gemini_ready": gemini_client is not None
+            "gemini_ready": gemini_client is not None,
+            "initialization_complete": app_state["initialization_complete"]
         },
         "endpoints": {
             "health": "/health",
@@ -187,9 +198,8 @@ def health():
             health_status["status"] = "degraded"
         else:
             with engine.connect() as conn:
-                # Use text() wrapper for SQL expression
                 result = conn.execute(text("SELECT 1"))
-                result.fetchone()  # Consume the result
+                result.fetchone()
             health_status["components"]["database"] = {
                 "status": "connected",
                 "message": "OK"
@@ -202,32 +212,18 @@ def health():
         health_status["status"] = "degraded"
     
     # Check RAG components
-    # Vector store
     if vectorstore is not None:
         health_status["components"]["vectorstore"] = {
             "status": "loaded",
             "message": "OK"
         }
-    elif init_error:
-        health_status["components"]["vectorstore"] = {
-            "status": "error",
-            "message": init_error[:100] if init_error else "Unknown error"
-        }
-        health_status["status"] = "degraded"
-    elif app_state["rag_initialization_started"] and not app_state["rag_initialization_complete"]:
-        health_status["components"]["vectorstore"] = {
-            "status": "loading",
-            "message": "Vector store is being loaded in background"
-        }
-        # Still considered healthy if loading in background
     else:
         health_status["components"]["vectorstore"] = {
-            "status": "not_initialized",
-            "message": "Vector store initialization not started"
+            "status": "error",
+            "message": init_error[:100] if init_error else "Vector store not loaded"
         }
-        health_status["status"] = "degraded"
+        health_status["status"] = "unhealthy"
     
-    # Gemini client
     if gemini_client is not None:
         health_status["components"]["gemini"] = {
             "status": "initialized",
@@ -238,7 +234,7 @@ def health():
             "status": "not_initialized",
             "message": "Gemini client not available"
         }
-        health_status["status"] = "degraded"
+        health_status["status"] = "unhealthy"
     
     # Add startup errors if any
     if app_state["startup_errors"]:
@@ -249,35 +245,59 @@ def health():
     return health_status
 
 # -----------------------------
-# READINESS PROBE (for Kubernetes/Cloud Run)
+# READINESS PROBE (for Cloud Run)
 # -----------------------------
 @app.get("/ready")
 def ready():
     """Readiness probe - checks if service is ready to accept traffic"""
-    from rag_engine import is_rag_initialized
+    from rag_engine import vectorstore, gemini_client, is_rag_initialized
     
-    # Basic readiness check
-    # Service is ready if database is connected (or at least initialized)
+    # Service is ready ONLY if both database AND RAG are ready
     try:
         from database import engine
-        if engine is None:
-            return {"ready": False, "reason": "Database not initialized"}
         
-        with engine.connect() as conn:
-            # Use text() wrapper for SQL expression
-            conn.execute(text("SELECT 1"))
+        # Check database
+        db_ready = False
+        if engine is not None:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_ready = True
         
-        # Database is connected, service is ready
-        # RAG can load in background
-        return {
-            "ready": True, 
-            "message": "Service is ready",
-            "rag_initialized": is_rag_initialized,
-            "rag_loading": app_state["rag_initialization_started"] and not app_state["rag_initialization_complete"]
-        }
+        # Check RAG
+        rag_ready = (
+            is_rag_initialized and 
+            vectorstore is not None and 
+            gemini_client is not None
+        )
+        
+        if db_ready and rag_ready:
+            return {
+                "ready": True,
+                "message": "Service is ready to accept requests",
+                "components": {
+                    "database": "ready",
+                    "rag": "ready",
+                    "vectorstore": "loaded",
+                    "gemini": "initialized"
+                }
+            }
+        else:
+            return {
+                "ready": False,
+                "reason": "Service is still initializing",
+                "components": {
+                    "database": "ready" if db_ready else "not ready",
+                    "rag": "ready" if rag_ready else "initializing",
+                    "vectorstore": "loaded" if vectorstore is not None else "loading",
+                    "gemini": "initialized" if gemini_client is not None else "initializing"
+                }
+            }
         
     except Exception as e:
-        return {"ready": False, "reason": f"Database error: {str(e)[:100]}"}
+        return {
+            "ready": False,
+            "reason": f"Error: {str(e)[:100]}"
+        }
 
 # -----------------------------
 # LIVENESS PROBE
@@ -337,61 +357,8 @@ def rag_status():
         "vectorstore_loaded": vectorstore is not None,
         "gemini_initialized": gemini_client is not None,
         "init_error": init_error,
-        "rag_initialization_started": app_state["rag_initialization_started"],
-        "rag_initialization_complete": app_state["rag_initialization_complete"],
-        "rag_ready": app_state["rag_ready"]
-    }
-
-# -----------------------------
-# SYSTEM STATUS ENDPOINT
-# -----------------------------
-@app.get("/system-status")
-def system_status():
-    """Get complete system status"""
-    from rag_engine import vectorstore, gemini_client, init_error, is_rag_initialized
-    from database import engine, _initialized
-    
-    db_connected = False
-    if engine is not None:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            db_connected = True
-        except:
-            db_connected = False
-    
-    return {
-        "application": {
-            "name": "Primis Digital Chatbot API",
-            "version": "1.0.0",
-            "uptime": str(datetime.datetime.utcnow() - app_state["startup_time"]) if app_state["startup_time"] else "unknown",
-            "startup_time": app_state["startup_time"].isoformat() if app_state["startup_time"] else None
-        },
-        "database": {
-            "initialized": _initialized,
-            "connected": db_connected,
-            "engine_available": engine is not None,
-            "ready": app_state["database_ready"]
-        },
-        "rag_system": {
-            "initialized": is_rag_initialized,
-            "vectorstore_loaded": vectorstore is not None,
-            "gemini_initialized": gemini_client is not None,
-            "rag_initialization_started": app_state["rag_initialization_started"],
-            "rag_initialization_complete": app_state["rag_initialization_complete"],
-            "rag_ready": app_state["rag_ready"],
-            "init_error": init_error
-        },
-        "services": {
-            "chat": "available",
-            "voice": "available",
-            "chat_history": "available"
-        },
-        "health": {
-            "overall": "healthy" if (db_connected or not _initialized) and is_rag_initialized else "degraded",
-            "database": "connected" if db_connected else "disconnected",
-            "rag": "ready" if is_rag_initialized else "initializing"
-        }
+        "rag_ready": app_state["rag_ready"],
+        "initialization_complete": app_state["initialization_complete"]
     }
 
 # -----------------------------
@@ -428,3 +395,4 @@ if __name__ == "__main__":
     import os
     port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
