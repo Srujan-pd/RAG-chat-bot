@@ -31,21 +31,16 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker for Artifact Registry
+      - name: Configure Docker
         run: gcloud auth configure-docker us-central1-docker.pkg.dev
 
-      - name: Build and Push Docker Image
+      - name: Build and Push
         run: |
-          # Generate image tag
           COMMIT_SHA=$(echo $GITHUB_SHA | cut -c1-40)
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          IMAGE_NAME="us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${COMMIT_SHA}"
-          IMAGE_LATEST="us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:latest"
+          IMAGE_NAME="us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot:${COMMIT_SHA}"
+          IMAGE_LATEST="us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot:latest"
           
-          echo "🏗️ Building Docker image..."
           docker build -t ${IMAGE_NAME} -t ${IMAGE_LATEST} .
-          
-          echo "📤 Pushing Docker image..."
           docker push ${IMAGE_NAME}
           docker push ${IMAGE_LATEST}
           
@@ -53,38 +48,22 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy ${{ env.SERVICE_NAME }} \
+          gcloud run deploy primis-digital-bot \
             --image ${{ env.IMAGE_NAME }} \
-            --region ${{ env.REGION }} \
+            --region us-central1 \
             --platform managed \
             --allow-unauthenticated \
             --memory 2Gi \
             --cpu 2 \
             --timeout 900 \
-            --min-instances 0 \
-            --max-instances 10 \
             --port 8080 \
-            --set-env-vars="PORT=8080,SUPABASE_BUCKET_NAME=vectorstore-bucket" \
+            --set-env-vars="SUPABASE_BUCKET_NAME=vectorstore-bucket" \
             --update-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,DATABASE_URL=DATABASE_URL:latest"
 
-      - name: Get Service URL
+      - name: Show URL
         run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format='value(status.url)')
-          
-          echo "SERVICE_URL=${SERVICE_URL}" >> $GITHUB_ENV
-
-      - name: Deployment Summary
-        run: |
-          echo "📢 Deployment Summary:"
-          echo "Project: ${{ env.PROJECT_ID }}"
-          echo "Service: ${{ env.SERVICE_NAME }}"
-          echo "Region: ${{ env.REGION }}"
-          echo "Commit: $(echo $GITHUB_SHA | cut -c1-40)"
-          echo "URL: ${{ env.SERVICE_URL }}"
-          echo ""
-          echo "📋 Endpoints:"
-          echo "  - Health: ${{ env.SERVICE_URL }}/health"
-          echo "  - Chat: ${{ env.SERVICE_URL }}/chat/"
-          echo "  - Docs: ${{ env.SERVICE_URL }}/docs"
+          echo "🎉 Deployment successful!"
+          SERVICE_URL=$(gcloud run services describe primis-digital-bot --region us-central1 --format='value(status.url)')
+          echo "Service URL: ${SERVICE_URL}"
+          echo "Health check: ${SERVICE_URL}/health"
+          echo "Chat endpoint: ${SERVICE_URL}/chat/"
