@@ -31,7 +31,6 @@ async def root():
             "chat": "POST /chat",
             "voice": "POST /voice",
             "health": "GET /health",
-            "status": "GET /chat/status",
             "docs": "GET /docs"
         }
     }
@@ -43,6 +42,8 @@ try:
     logger.info("✅ Chat router loaded")
 except Exception as e:
     logger.error(f"❌ Failed to load chat router: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
 
 try:
     from voice_chat import router as voice_router
@@ -50,8 +51,10 @@ try:
     logger.info("✅ Voice router loaded")
 except Exception as e:
     logger.error(f"❌ Failed to load voice router: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
 
-# Startup
+# Startup event
 @app.on_event("startup")
 async def startup():
     logger.info("🚀 Starting AI Chat Bot...")
@@ -60,8 +63,11 @@ async def startup():
     try:
         from database import engine, Base
         import models
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database initialized")
+        if Base is not None and engine is not None:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database initialized")
+        else:
+            logger.warning("⚠️ Database not configured - skipping initialization")
     except Exception as e:
         logger.error(f"⚠️ Database init error: {e}")
     
