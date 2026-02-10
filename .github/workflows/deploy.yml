@@ -14,50 +14,30 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     
-    permissions:
-      contents: 'read'
-      id-token: 'write'
-    
     steps:
     - uses: actions/checkout@v3
     
-    - name: Google Cloud Auth
+    - name: Google Cloud Auth (Service Account Key)
       uses: google-github-actions/auth@v1
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
-        token_format: 'access_token'
     
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v1
       with:
         project_id: ${{ secrets.GCP_PROJECT_ID }}
-        export_default_credentials: true
     
     - name: Configure Docker
       run: |
-        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+        # Explicitly authenticate Docker
+        echo "${{ secrets.GCP_SA_KEY }}" | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev
     
-    - name: Create Artifact Registry repository if needed
+    - name: Build Docker image
       run: |
-        # Check if repository exists
-        if ! gcloud artifacts repositories describe cloud-run-source-deploy \
-          --location=$REGION --project=$PROJECT_ID >/dev/null 2>&1; then
-          echo "Creating Artifact Registry repository..."
-          gcloud artifacts repositories create cloud-run-source-deploy \
-            --repository-format=docker \
-            --location=$REGION \
-            --project=$PROJECT_ID \
-            --description="Docker repository for Cloud Run deployments"
-        else
-          echo "Artifact Registry repository already exists"
-        fi
-    
-    - name: Build and push Docker image
-      run: |
-        # Build Docker image
         docker build -t $REPOSITORY/$SERVICE_NAME:${{ github.sha }} .
-        
-        # Push to Artifact Registry
+    
+    - name: Push Docker image
+      run: |
         docker push $REPOSITORY/$SERVICE_NAME:${{ github.sha }}
     
     - name: Deploy to Cloud Run
@@ -66,20 +46,20 @@ jobs:
           --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
           --region $REGION \
           --allow-unauthenticated \
+          --update-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
           --memory=1Gi \
           --cpu=1 \
           --timeout=300s \
-          --port=8080 \
-          --revision-suffix=v${{ github.run_number }} \
-          --update-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}"
+          --port=8080
     
     - name: Verify Deployment
       run: |
         SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
           --region $REGION \
           --format='value(status.url)')
-        echo "✅ Deployment Successful!"
-        echo "🌐 Service URL: $SERVICE_URL"
-        echo "🏥 Health: $SERVICE_URL/health"
-        echo "💬 Chat: POST $SERVICE_URL/chat"
-        echo "🎤 Voice: POST $SERVICE_URL/voice"
+        echo "✅ Service deployed at: $SERVICE_URL"
+        echo "📋 Endpoints:"
+        echo "  - Health: $SERVICE_URL/health"
+        echo "  - Chat: POST $SERVICE_URL/chat"
+        echo "  - Voice: POST $SERVICE_URL/voice"
+        echo "  - Docs: $SERVICE_URL/docs"
