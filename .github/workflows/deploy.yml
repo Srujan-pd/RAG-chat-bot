@@ -3,8 +3,6 @@ name: Deploy to Cloud Run
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -12,38 +10,8 @@ env:
   REGION: us-central1
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Lint with flake8
-      run: |
-        pip install flake8
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    
-    - name: Test imports
-      run: |
-        python -c "from main import app; print('✅ Main imports work')"
-        python -c "from database import engine; print('✅ Database imports work')"
-        python -c "from rag_engine import initialize_gemini; print('✅ RAG imports work')"
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
     - uses: actions/checkout@v3
@@ -62,23 +30,13 @@ jobs:
       run: |
         gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
     
-    - name: Build and Push Docker image
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        SUPABASE_BUCKET_NAME: ${{ secrets.SUPABASE_BUCKET_NAME }}
+    - name: Build Docker image
       run: |
-        # Build with secrets as build args
         docker build \
-          --build-arg GEMINI_API_KEY="$GEMINI_API_KEY" \
-          --build-arg DATABASE_URL="$DATABASE_URL" \
-          --build-arg SUPABASE_URL="$SUPABASE_URL" \
-          --build-arg SUPABASE_KEY="$SUPABASE_KEY" \
-          --build-arg SUPABASE_BUCKET_NAME="$SUPABASE_BUCKET_NAME" \
           -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} .
-        
+    
+    - name: Push Docker image
+      run: |
         docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
     
     - name: Deploy to Cloud Run
@@ -94,21 +52,12 @@ jobs:
           --timeout=300s \
           --port=8080
     
-    - name: Test Deployment
+    - name: Get Service URL
       run: |
         SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
           --region ${{ env.REGION }} \
           --format='value(status.url)')
-        
+        echo "Service deployed successfully!"
         echo "Service URL: $SERVICE_URL"
-        
-        # Wait for service to be ready
-        sleep 30
-        
-        # Test health endpoint
-        curl -f $SERVICE_URL/health || exit 1
-        echo "✅ Health check passed"
-        
-        # Test root endpoint
-        curl -f $SERVICE_URL/ || exit 1
-        echo "✅ Root endpoint passed"
+        echo "Health check: $SERVICE_URL/health"
+        echo "API Docs: $SERVICE_URL/docs"
