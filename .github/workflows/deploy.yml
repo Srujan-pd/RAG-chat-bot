@@ -31,42 +31,53 @@ jobs:
       run: |
         gcloud auth configure-docker us-central1-docker.pkg.dev
     
-    - name: Create Artifact Registry repository if not exists
+    - name: Build and push Docker image
       run: |
-        if ! gcloud artifacts repositories describe cloud-run-source-deploy \
-          --location=us-central1 --project=$PROJECT_ID >/dev/null 2>&1; then
-          echo "Creating Artifact Registry repository..."
-          gcloud artifacts repositories create cloud-run-source-deploy \
-            --repository-format=docker \
-            --location=us-central1 \
-            --project=$PROJECT_ID
-        else
-          echo "Artifact Registry repository already exists"
-        fi
-    
-    - name: Build Docker image
-      run: |
-        docker build \
-          -t $REPOSITORY/$SERVICE_NAME:${{ github.sha }} .
-    
-    - name: Push Docker image
-      run: |
+        # Build Docker image
+        docker build -t $REPOSITORY/$SERVICE_NAME:${{ github.sha }} .
+        
+        # Push to Artifact Registry
         docker push $REPOSITORY/$SERVICE_NAME:${{ github.sha }}
     
-    - name: Deploy to Cloud Run
+    - name: Check existing environment variables
       run: |
-        gcloud run deploy $SERVICE_NAME \
-          --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
-          --platform managed \
+        echo "Checking existing environment variables..."
+        gcloud run services describe $SERVICE_NAME \
           --region $REGION \
-          --allow-unauthenticated \
-          --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
-          --memory=1Gi \
-          --cpu=1 \
-          --timeout=300s \
-          --port=8080 \
-          --min-instances=0 \
-          --max-instances=3
+          --format="yaml(spec.template.spec.containers[0].env)" || echo "Service might not exist yet"
+    
+    - name: Update Cloud Run service
+      run: |
+        # Check if service exists
+        if gcloud run services describe $SERVICE_NAME --region $REGION --format="value(name)" >/dev/null 2>&1; then
+          echo "Service exists, updating with --update-env-vars..."
+          
+          # Update service with environment variables
+          gcloud run services update $SERVICE_NAME \
+            --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
+            --region $REGION \
+            --update-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
+            --memory=1Gi \
+            --cpu=1 \
+            --timeout=300s \
+            --port=8080
+        else
+          echo "Service doesn't exist, creating new service..."
+          
+          # Create new service
+          gcloud run deploy $SERVICE_NAME \
+            --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
+            --platform managed \
+            --region $REGION \
+            --allow-unauthenticated \
+            --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
+            --memory=1Gi \
+            --cpu=1 \
+            --timeout=300s \
+            --port=8080 \
+            --min-instances=0 \
+            --max-instances=3
+        fi
     
     - name: Get Service URL
       run: |
