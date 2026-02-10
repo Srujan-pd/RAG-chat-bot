@@ -3,6 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 
+from chat import router as chat_router
+from voice_chat import router as voice_router
+from rag_engine import start_loading_vectorstore, initialize_gemini
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,10 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "AI Chat Bot"}
+
+
+app.include_router(chat_router)
+app.include_router(voice_router)
 
 # Root endpoint
 @app.get("/")
