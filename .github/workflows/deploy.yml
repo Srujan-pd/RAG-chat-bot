@@ -6,8 +6,9 @@ on:
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  SERVICE_NAME: ai-chat-bot
+  SERVICE_NAME: primis-digital-bot
   REGION: us-central1
+  REPOSITORY: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy
 
 jobs:
   deploy:
@@ -28,36 +29,53 @@ jobs:
     
     - name: Configure Docker
       run: |
-        gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+        gcloud auth configure-docker us-central1-docker.pkg.dev
+    
+    - name: Create Artifact Registry repository if not exists
+      run: |
+        if ! gcloud artifacts repositories describe cloud-run-source-deploy \
+          --location=us-central1 --project=$PROJECT_ID >/dev/null 2>&1; then
+          echo "Creating Artifact Registry repository..."
+          gcloud artifacts repositories create cloud-run-source-deploy \
+            --repository-format=docker \
+            --location=us-central1 \
+            --project=$PROJECT_ID
+        else
+          echo "Artifact Registry repository already exists"
+        fi
     
     - name: Build Docker image
       run: |
         docker build \
-          -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} .
+          -t $REPOSITORY/$SERVICE_NAME:${{ github.sha }} .
     
     - name: Push Docker image
       run: |
-        docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+        docker push $REPOSITORY/$SERVICE_NAME:${{ github.sha }}
     
     - name: Deploy to Cloud Run
       run: |
-        gcloud run deploy ${{ env.SERVICE_NAME }} \
-          --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+        gcloud run deploy $SERVICE_NAME \
+          --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
           --platform managed \
-          --region ${{ env.REGION }} \
+          --region $REGION \
           --allow-unauthenticated \
           --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
           --memory=1Gi \
           --cpu=1 \
           --timeout=300s \
-          --port=8080
+          --port=8080 \
+          --min-instances=0 \
+          --max-instances=3
     
     - name: Get Service URL
       run: |
-        SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-          --region ${{ env.REGION }} \
+        SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
+          --region $REGION \
           --format='value(status.url)')
-        echo "Service deployed successfully!"
-        echo "Service URL: $SERVICE_URL"
-        echo "Health check: $SERVICE_URL/health"
-        echo "API Docs: $SERVICE_URL/docs"
+        echo "🚀 Deployment Complete!"
+        echo "📱 Service URL: $SERVICE_URL"
+        echo "🏥 Health: $SERVICE_URL/health"
+        echo "💬 Chat: POST $SERVICE_URL/chat"
+        echo "🎤 Voice: POST $SERVICE_URL/voice"
+        echo "📚 Docs: $SERVICE_URL/docs"
