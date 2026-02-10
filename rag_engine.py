@@ -186,7 +186,6 @@ def get_answer(question, session_id=None, db_session=None):
         if not relevant_chunks:
             return "I couldn't find relevant information in our knowledge base. Could you rephrase your question?"
 
-<<<<<<< HEAD
         logger.info(f"📚 Found {len(relevant_chunks)} relevant documents")
         
         # Prepare context (limit to avoid token limits)
@@ -196,9 +195,6 @@ def get_answer(question, session_id=None, db_session=None):
         
         # Generate answer using Gemini
         prompt = f"""You are a helpful AI assistant for Primis Digital.
-=======
-        docs = db.similarity_search(search_query, k=100)
->>>>>>> 9903767 (updated file)
 
 Based on this information from Primis Digital's website:
 
@@ -274,7 +270,6 @@ Rewrite the question to be clear and standalone:
             contents=prompt
         )
 
-<<<<<<< HEAD
         return response.text.strip()
     except Exception as e:
         logger.error(f"Error rewriting question: {e}")
@@ -295,6 +290,3 @@ def get_vectorstore_status():
         "error": load_error,
         "gemini_ready": gemini_client is not None
     }
-=======
-    return response.text.strip()
->>>>>>> 9903767 (updated file)
