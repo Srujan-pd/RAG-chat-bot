@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,8 +27,10 @@ async def health():
 async def root():
     return {
         "message": "AI Chat Bot API",
+        "version": "1.0.0",
         "endpoints": {
             "chat": "POST /chat",
+            "history": "GET /chat/history/{user_id}",
             "health": "GET /health",
             "docs": "GET /docs"
         }
@@ -63,3 +66,8 @@ async def startup():
         logger.info("✅ RAG system starting")
     except Exception as e:
         logger.error(f"⚠️ RAG init error: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)

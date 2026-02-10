@@ -2,37 +2,65 @@ name: Deploy to Cloud Run
 
 on:
   push:
-    branches: [main]
-
-env:
-  PROJECT_ID: poc-genai-chatbot
-  SERVICE_NAME: primis-digital-bot
-  REGION: us-central1
+    branches:
+      - main
+      - master
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Google Auth
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Google Auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-    - name: Setup gcloud
-      uses: google-github-actions/setup-gcloud@v2
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-    - name: Deploy
-      run: |
-        gcloud run deploy $SERVICE_NAME \
-          --source . \
-          --region $REGION \
-          --platform managed \
-          --allow-unauthenticated \
-          --memory 2Gi \
-          --cpu 2 \
-          --timeout 300 \
-          --port 8080 \
-          --set-env-vars="HF_HOME=/tmp/huggingface,TMPDIR=/tmp"
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE="us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot:${{ github.sha }}"
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ai-chatbot-backend \
+            --image=us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot:${{ github.sha }} \
+            --platform=managed \
+            --region=us-central1 \
+            --allow-unauthenticated \
+            --memory=2Gi \
+            --cpu=2 \
+            --timeout=300 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --concurrency=80 \
+            --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
+            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
+            --set-env-vars="SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" \
+            --set-env-vars="SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}"
+
+      - name: Show Deployment URL
+        run: |
+          echo "🚀 Deployment successful!"
+          gcloud run services describe ai-chatbot-backend \
+            --platform=managed \
+            --region=us-central1 \
+            --format='value(status.url)'
+
