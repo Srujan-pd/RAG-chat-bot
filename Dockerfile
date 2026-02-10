@@ -1,35 +1,24 @@
-# Use Python 3.11 slim image for smaller size
 FROM python:3.11-slim
 
-# Set working directory
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Install system dependencies (minimal)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    curl \
+# System deps (needed for psycopg2 & faiss)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    build-essential \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+COPY . .
 
-# Copy ALL application files
-COPY *.py ./
-
-# Create necessary directories
-RUN mkdir -p /tmp/vectorstore /tmp/huggingface
-
-# Expose port (Cloud Run will inject PORT env var)
-ENV PORT=8080
+# Cloud Run listens on 8080
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
 
-# Run the application
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1
