@@ -27,10 +27,9 @@ async def health():
 async def root():
     return {
         "message": "AI Chat Bot API",
-        "version": "1.0.0",
         "endpoints": {
             "chat": "POST /chat",
-            "history": "GET /chat/history/{user_id}",
+            "voice": "POST /voice",
             "health": "GET /health",
             "docs": "GET /docs"
         }
@@ -43,6 +42,14 @@ try:
     logger.info("✅ Chat router loaded")
 except Exception as e:
     logger.error(f"❌ Failed to load chat router: {e}")
+
+# Import voice router
+try:
+    from voice_chat import router as voice_router
+    app.include_router(voice_router)
+    logger.info("✅ Voice router loaded")
+except Exception as e:
+    logger.error(f"❌ Failed to load voice router: {e}")
 
 # Startup
 @app.on_event("startup")

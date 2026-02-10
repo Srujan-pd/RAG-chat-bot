@@ -17,8 +17,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY main.py chat.py rag_engine.py database.py models.py supabase_manager.py ./
+# Copy ALL application files
+COPY *.py ./
 
 # Create necessary directories
 RUN mkdir -p /tmp/vectorstore /tmp/huggingface
