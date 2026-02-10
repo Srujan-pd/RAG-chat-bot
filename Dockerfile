@@ -1,22 +1,26 @@
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8080 \
+    MODEL_CACHE=/app/model_cache
 
 WORKDIR /app
 
-# System deps (needed for psycopg2, faiss, and sentence-transformers)
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libpq-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Create cache directory for HuggingFace models
+RUN mkdir -p /app/model_cache && chmod 777 /app/model_cache
+
 # Copy requirements first for better caching
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -24,9 +28,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /tmp/vectorstore /tmp/huggingface
+RUN mkdir -p /tmp/vectorstore && chmod 777 /tmp/vectorstore
 
-# Cloud Run listens on 8080
+# Expose port
 EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Run the application
+CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1

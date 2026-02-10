@@ -1,62 +1,157 @@
-# chat.py - This should be a router, not a duplicate of main.py
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timedelta
+import os, uuid
+from fastapi import APIRouter, Form, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-import uuid
-import logging
-from database import get_db
-from rag_engine import get_answer
+from database import SessionLocal
 from models import Chat
+from datetime import datetime, timedelta
+from rag_engine import get_answer
 
 router = APIRouter(prefix="/chat")
-logger = logging.getLogger(__name__)
 
-# Request/Response models
-class ChatRequest(BaseModel):
-    question: str
-    user_id: str = "default_user"
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-class ChatResponse(BaseModel):
-    answer: str
-    session_id: str
+
+# SESSION HANDLER
+def get_or_create_session(request: Request, response: Response):
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            max_age = 60 * 60 * 24 * 7,    # 7days
+            samesite="lax"
+        )
+    return session_id
+
+# LOAD CHAT HISTORY FOR CONTEXT
+def build_prompt(db, session_id, user_message, context_limit=10):
+    """
+    Build prompt with recent chat history for context.
+    context_limit: Number of recent exchanges to include (default 10)
+    """
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    chats = (
+        db.query(Chat)
+        .filter(
+            Chat.session_id == session_id,
+            Chat.created_at >= seven_days_ago
+        )
+        .order_by(Chat.created_at.desc())
+        .limit(context_limit)
+        .all()
+    )
+
+    # Reverse to get chronological order
+    chats = list(reversed(chats))
+
+    if chats:
+        prompt = "You are a helpful support AI assistant. Previous conversation:\n\n"
+        for chat in chats:
+            prompt += f"User: {chat.question}\n"
+            prompt += f"Assistant: {chat.answer}\n\n"
+        prompt += f"User: {user_message}\nAssistant:"
+    else:
+        prompt = f"You are a helpful support AI assistant.\n\nUser: {user_message}\nAssistant:"
+
+    return prompt
 
 @router.post("/")
-async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_main(
+    request: Request,
+    response: Response,
+    text: str = Form(...),
+    user_id: str = Form("default_user"),
+    db: Session = Depends(get_db)
+):
     """
-    Main chat endpoint
+    Main chat endpoint - accepts form data
+    Uses RAG to answer from website content
     """
     try:
-        # Generate or use session ID
-        session_id = str(uuid.uuid4())
-        
-        # Get answer from RAG system
-        answer = get_answer(request.question, session_id, db)
-        
-        # Save to database
-        chat_record = Chat(
+        session_id = get_or_create_session(request, response)
+
+        # Get AI response using RAG
+        ai_text = get_answer(
+            question=text,
             session_id=session_id,
-            user_id=request.user_id,
-            question=request.question,
-            answer=answer
+            db_session=db
+      )
+
+
+
+        # Save to database
+        new_chat = Chat(
+            session_id=session_id,
+            user_id=user_id,
+            question=text,
+            answer=ai_text,
+            created_at=datetime.utcnow()
         )
-        db.add(chat_record)
+        db.add(new_chat)
         db.commit()
-        
+        db.refresh(new_chat)
+
         return {
-            "answer": answer,
+            "message": ai_text,
             "session_id": session_id,
             "status": "success"
         }
-        
-    except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        if db:
-            db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/status")
-async def chat_status():
-    """Check RAG system status"""
-    from rag_engine import get_vectorstore_status
-    status = get_vectorstore_status()
-    return {"status": "ready" if status["loaded"] else "loading", "details": status}
+    except Exception as e:
+        print("❌ Error:", str(e))
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
+
+
+@router.get("/history/{user_id}")
+async def get_chat_history(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50
+):
+    """
+    Get chat history for current session
+    Returns array directly so frontend .slice() works
+    """
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return []
+
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    try:
+        # Get last N messages in chronological order
+        chats = (
+            db.query(Chat)
+            .filter(
+                Chat.session_id == session_id,
+                Chat.created_at >= seven_days_ago
+            )
+            .order_by(Chat.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+
+        return [
+            {
+                "id": chat.id,
+                "question": chat.question,
+                "answer": chat.answer,
+                "created_at": chat.created_at.isoformat() if chat.created_at else None
+            }
+            for chat in chats
+        ]
+
+    except Exception as e:
+        print("❌ History Error:", str(e))
+        return []

@@ -14,14 +14,8 @@ class SupabaseStorageManager:
         if not supabase_url or not supabase_key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
         
-        logger.info(f"🔗 Initializing Supabase client for URL: {supabase_url[:30]}...")
-        
-        try:
-            self.client: Client = create_client(supabase_url, supabase_key)
-            logger.info("✅ Supabase client initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to create Supabase client: {e}")
-            raise
+        self.client: Client = create_client(supabase_url, supabase_key)
+        logger.info("✅ Supabase client initialized")
     
     def download_file(self, remote_path: str, local_path: str, bucket_name: str) -> bool:
         """Download file from Supabase Storage"""
@@ -30,10 +24,6 @@ class SupabaseStorageManager:
             
             # Download file content
             response = self.client.storage.from_(bucket_name).download(remote_path)
-            
-            if response is None:
-                logger.error(f"❌ No response received for {remote_path}")
-                return False
             
             # Write to local file
             with open(local_path, 'wb') as f:
