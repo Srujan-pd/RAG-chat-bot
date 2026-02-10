@@ -53,9 +53,10 @@ jobs:
       - name: Deploy to Cloud Run (Update Image Only)
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image=${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            --image=... \
             --platform=managed \
-            --region=${{ env.REGION }}
+            --region=${{ env.REGION }} \
+            --update-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,DATABASE_URL=DATABASE_URL:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest"
 
       - name: Show Deployment Info
         run: |
