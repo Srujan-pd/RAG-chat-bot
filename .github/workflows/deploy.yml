@@ -2,53 +2,113 @@ name: Deploy to Cloud Run
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 env:
-  PROJECT_ID: poc-genai-chatbot
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  SERVICE_NAME: ai-chat-bot
   REGION: us-central1
-  SERVICE_NAME: primis-digital-bot
-  IMAGE_NAME: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      id-token: write
-
+    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Test imports
+      run: |
+        python -c "from main import app; print('✅ Main imports work')"
+        python -c "from database import engine; print('✅ Database imports work')"
+        python -c "from rag_engine import initialize_gemini; print('✅ RAG imports work')"
 
-    - name: Setup gcloud
-      uses: google-github-actions/setup-gcloud@v2
-
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Google Cloud Auth
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+    
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
     - name: Configure Docker
       run: |
-        gcloud auth configure-docker us-central1-docker.pkg.dev
-
-    - name: Build Docker image
+        gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+    
+    - name: Build and Push Docker image
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        SUPABASE_BUCKET_NAME: ${{ secrets.SUPABASE_BUCKET_NAME }}
       run: |
-        docker build -t $IMAGE_NAME:$GITHUB_SHA .
-
-    - name: Push Docker image
-      run: |
-        docker push $IMAGE_NAME:$GITHUB_SHA
-
+        # Build with secrets as build args
+        docker build \
+          --build-arg GEMINI_API_KEY="$GEMINI_API_KEY" \
+          --build-arg DATABASE_URL="$DATABASE_URL" \
+          --build-arg SUPABASE_URL="$SUPABASE_URL" \
+          --build-arg SUPABASE_KEY="$SUPABASE_KEY" \
+          --build-arg SUPABASE_BUCKET_NAME="$SUPABASE_BUCKET_NAME" \
+          -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} .
+        
+        docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+    
     - name: Deploy to Cloud Run
       run: |
-        gcloud run deploy $SERVICE_NAME \
-          --image $IMAGE_NAME:$GITHUB_SHA \
-          --region $REGION \
+        gcloud run deploy ${{ env.SERVICE_NAME }} \
+          --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
           --platform managed \
+          --region ${{ env.REGION }} \
           --allow-unauthenticated \
-          --port 8080
-
+          --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
+          --memory=1Gi \
+          --cpu=1 \
+          --timeout=300s \
+          --port=8080
+    
+    - name: Test Deployment
+      run: |
+        SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+          --region ${{ env.REGION }} \
+          --format='value(status.url)')
+        
+        echo "Service URL: $SERVICE_URL"
+        
+        # Wait for service to be ready
+        sleep 30
+        
+        # Test health endpoint
+        curl -f $SERVICE_URL/health || exit 1
+        echo "✅ Health check passed"
+        
+        # Test root endpoint
+        curl -f $SERVICE_URL/ || exit 1
+        echo "✅ Root endpoint passed"

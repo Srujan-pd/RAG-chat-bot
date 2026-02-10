@@ -31,11 +31,12 @@ async def root():
             "chat": "POST /chat",
             "voice": "POST /voice",
             "health": "GET /health",
+            "status": "GET /chat/status",
             "docs": "GET /docs"
         }
     }
 
-# Import chat router
+# Import and include routers
 try:
     from chat import router as chat_router
     app.include_router(chat_router)
@@ -43,7 +44,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to load chat router: {e}")
 
-# Import voice router
 try:
     from voice_chat import router as voice_router
     app.include_router(voice_router)

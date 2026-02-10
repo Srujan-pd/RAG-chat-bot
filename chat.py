@@ -1,80 +1,62 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# chat.py - This should be a router, not a duplicate of main.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+import uuid
 import logging
-import os
+from database import get_db
+from rag_engine import get_answer
+from models import Chat
 
-logging.basicConfig(level=logging.INFO)
+router = APIRouter(prefix="/chat")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Chat Bot")
+# Request/Response models
+class ChatRequest(BaseModel):
+    question: str
+    user_id: str = "default_user"
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class ChatResponse(BaseModel):
+    answer: str
+    session_id: str
 
-# Health endpoint (REQUIRED for Cloud Run)
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "service": "AI Chat Bot"}
-
-# Root endpoint
-@app.get("/")
-async def root():
-    return {
-        "message": "AI Chat Bot API",
-        "endpoints": {
-            "chat": "POST /chat",
-            "voice": "POST /voice",
-            "health": "GET /health",
-            "docs": "GET /docs"
+@router.post("/")
+async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+    """
+    Main chat endpoint
+    """
+    try:
+        # Generate or use session ID
+        session_id = str(uuid.uuid4())
+        
+        # Get answer from RAG system
+        answer = get_answer(request.question, session_id, db)
+        
+        # Save to database
+        chat_record = Chat(
+            session_id=session_id,
+            user_id=request.user_id,
+            question=request.question,
+            answer=answer
+        )
+        db.add(chat_record)
+        db.commit()
+        
+        return {
+            "answer": answer,
+            "session_id": session_id,
+            "status": "success"
         }
-    }
-
-# Import chat router
-try:
-    from chat import router as chat_router
-    app.include_router(chat_router)
-    logger.info("✅ Chat router loaded")
-except Exception as e:
-    logger.error(f"❌ Failed to load chat router: {e}")
-
-# Import voice router
-try:
-    from voice_chat import router as voice_router
-    app.include_router(voice_router)
-    logger.info("✅ Voice router loaded")
-except Exception as e:
-    logger.error(f"❌ Failed to load voice router: {e}")
-
-# Startup
-@app.on_event("startup")
-async def startup():
-    logger.info("🚀 Starting AI Chat Bot...")
-    
-    # Initialize database
-    try:
-        from database import engine, Base
-        import models
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database initialized")
+        
     except Exception as e:
-        logger.error(f"⚠️ Database init error: {e}")
-    
-    # Initialize RAG system
-    try:
-        from rag_engine import initialize_gemini, start_loading_vectorstore
-        initialize_gemini()
-        start_loading_vectorstore()
-        logger.info("✅ RAG system starting")
-    except Exception as e:
-        logger.error(f"⚠️ RAG init error: {e}")
+        logger.error(f"Chat error: {str(e)}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@router.get("/status")
+async def chat_status():
+    """Check RAG system status"""
+    from rag_engine import get_vectorstore_status
+    status = get_vectorstore_status()
+    return {"status": "ready" if status["loaded"] else "loading", "details": status}
