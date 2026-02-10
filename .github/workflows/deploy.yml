@@ -27,66 +27,48 @@ jobs:
       with:
         project_id: ${{ secrets.GCP_PROJECT_ID }}
     
-    - name: Configure Docker
-      run: |
-        gcloud auth configure-docker us-central1-docker.pkg.dev
-    
     - name: Build and push Docker image
       run: |
-        # Build Docker image
         docker build -t $REPOSITORY/$SERVICE_NAME:${{ github.sha }} .
-        
-        # Push to Artifact Registry
         docker push $REPOSITORY/$SERVICE_NAME:${{ github.sha }}
     
-    - name: Check existing environment variables
+    - name: Deploy New Revision
       run: |
-        echo "Checking existing environment variables..."
-        gcloud run services describe $SERVICE_NAME \
+        # Deploy as a new revision with ALL environment variables at once
+        echo "Deploying new revision..."
+        gcloud run deploy $SERVICE_NAME \
+          --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
           --region $REGION \
-          --format="yaml(spec.template.spec.containers[0].env)" || echo "Service might not exist yet"
+          --allow-unauthenticated \
+          --memory=1Gi \
+          --cpu=1 \
+          --timeout=300s \
+          --port=8080 \
+          --no-traffic \
+          --revision-suffix=v${{ github.run_number }} \
+          --update-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}"
     
-    - name: Update Cloud Run service
+    - name: Send Traffic to New Revision
       run: |
-        # Check if service exists
-        if gcloud run services describe $SERVICE_NAME --region $REGION --format="value(name)" >/dev/null 2>&1; then
-          echo "Service exists, updating with --update-env-vars..."
-          
-          # Update service with environment variables
-          gcloud run services update $SERVICE_NAME \
-            --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
-            --region $REGION \
-            --update-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
-            --memory=1Gi \
-            --cpu=1 \
-            --timeout=300s \
-            --port=8080
-        else
-          echo "Service doesn't exist, creating new service..."
-          
-          # Create new service
-          gcloud run deploy $SERVICE_NAME \
-            --image $REPOSITORY/$SERVICE_NAME:${{ github.sha }} \
-            --platform managed \
-            --region $REGION \
-            --allow-unauthenticated \
-            --set-env-vars="GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
-            --memory=1Gi \
-            --cpu=1 \
-            --timeout=300s \
-            --port=8080 \
-            --min-instances=0 \
-            --max-instances=3
-        fi
+        echo "Sending 100% traffic to new revision..."
+        gcloud run services update-traffic $SERVICE_NAME \
+          --region $REGION \
+          --to-latest
     
-    - name: Get Service URL
+    - name: Get Service Info
       run: |
         SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
           --region $REGION \
           --format='value(status.url)')
-        echo "🚀 Deployment Complete!"
-        echo "📱 Service URL: $SERVICE_URL"
+        echo "✅ Deployment Successful!"
+        echo "🌐 Service URL: $SERVICE_URL"
         echo "🏥 Health: $SERVICE_URL/health"
         echo "💬 Chat: POST $SERVICE_URL/chat"
-        echo "🎤 Voice: POST $SERVICE_URL/voice"
-        echo "📚 Docs: $SERVICE_URL/docs"
+        
+        # List all revisions
+        echo ""
+        echo "📋 Available Revisions:"
+        gcloud run revisions list \
+          --service $SERVICE_NAME \
+          --region $REGION \
+          --format="table(name,creationTimestamp,status.conditions[0].status)"
