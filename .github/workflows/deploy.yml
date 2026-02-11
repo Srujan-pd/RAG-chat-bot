@@ -51,8 +51,9 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          # Use the IMAGE_TAG variable directly (not as env.IMAGE_TAG)
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.IMAGE_TAG }} \
+            --image "$IMAGE_TAG" \
             --platform managed \
             --region ${{ env.REGION }} \
             --allow-unauthenticated \
@@ -61,12 +62,7 @@ jobs:
             --timeout 300 \
             --max-instances 10 \
             --min-instances 0 \
-            --set-env-vars="PORT=8080" \
-            --set-secrets="DATABASE_URL=DATABASE_URL:latest,\
-GEMINI_API_KEY=GEMINI_API_KEY:latest,\
-SUPABASE_URL=SUPABASE_URL:latest,\
-SUPABASE_KEY=SUPABASE_KEY:latest,\
-SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
+            --update-secrets="DATABASE_URL=DATABASE_URL:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
             --quiet
 
       - name: Get Service URL
