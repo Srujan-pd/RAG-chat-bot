@@ -11,26 +11,20 @@ env:
   REGION: us-central1
   SERVICE_NAME: ai-chatbot-backend
   ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot
-  # Add service account for secret access
-  SERVICE_ACCOUNT: cloud-run-sa@poc-genai-chatbot.iam.gserviceaccount.com
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
-    permissions:
-      contents: read
-      id-token: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # SIMPLE FIX: Just remove token_format
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-          token_format: access_token
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -44,83 +38,28 @@ jobs:
       - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=${{ env.ARTIFACT_REGISTRY }}:${{ github.sha }}
-          IMAGE_LATEST=${{ env.ARTIFACT_REGISTRY }}:latest
-          
-          docker build -t $IMAGE_TAG -t $IMAGE_LATEST .
+          docker build -t $IMAGE_TAG .
           docker push $IMAGE_TAG
-          docker push $IMAGE_LATEST
-          
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-
-      - name: Delete existing service (clean deployment)
-        run: |
-          echo "🗑️ Checking if service exists..."
-          if gcloud run services describe ${{ env.SERVICE_NAME }} --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} --quiet 2>/dev/null; then
-            echo "Service exists. Deleting for clean deployment..."
-            gcloud run services delete ${{ env.SERVICE_NAME }} \
-              --region=${{ env.REGION }} \
-              --project=${{ env.PROJECT_ID }} \
-              --quiet
-            echo "⏳ Waiting for deletion to complete..."
-            sleep 20
-          else
-            echo "✅ No existing service found."
-          fi
-
-      - name: Ensure secrets exist in Secret Manager
-        run: |
-          # List of required secrets
-          SECRETS=("DATABASE_URL" "GEMINI_API_KEY" "SUPABASE_URL" "SUPABASE_KEY" "SUPABASE_BUCKET_NAME")
-          
-          for SECRET in "${SECRETS[@]}"; do
-            if gcloud secrets describe $SECRET --project=${{ env.PROJECT_ID }} --quiet 2>/dev/null; then
-              echo "✅ Secret $SECRET exists"
-            else
-              echo "⚠️ Secret $SECRET does not exist. Creating placeholder..."
-              echo "placeholder" | gcloud secrets create $SECRET \
-                --data-file=- \
-                --project=${{ env.PROJECT_ID }} \
-                --quiet
-            fi
-          done
-
-      - name: Grant Secret Manager access to Cloud Run service account
-        run: |
-          # Get project number
-          PROJECT_NUMBER=$(gcloud projects describe ${{ env.PROJECT_ID }} --format='value(projectNumber)')
-          
-          # Default Compute Engine service account
-          COMPUTE_SA="$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
-          
-          SECRETS=("DATABASE_URL" "GEMINI_API_KEY" "SUPABASE_URL" "SUPABASE_KEY" "SUPABASE_BUCKET_NAME")
-          
-          for SECRET in "${SECRETS[@]}"; do
-            echo "🔐 Granting access to secret: $SECRET"
-            gcloud secrets add-iam-policy-binding $SECRET \
-              --member=serviceAccount:$COMPUTE_SA \
-              --role=roles/secretmanager.secretAccessor \
-              --project=${{ env.PROJECT_ID }} \
-              --quiet 2>/dev/null || echo "Already has access or binding failed"
-          done
 
       - name: Deploy to Cloud Run
         run: |
-          echo "🚀 Deploying to Cloud Run..."
+          # Delete existing service if it exists (to fix the DATABASE_URL conflict)
+          gcloud run services delete ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --quiet || true
           
-          # Deploy with secrets (not env vars)
+          sleep 10
+          
+          # Deploy fresh
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image "$IMAGE_TAG" \
             --platform managed \
             --region ${{ env.REGION }} \
-            --project ${{ env.PROJECT_ID }} \
             --allow-unauthenticated \
             --memory 2Gi \
             --cpu 2 \
             --timeout 300 \
-            --max-instances 10 \
-            --min-instances 0 \
-            --concurrency 80 \
-            --port 8080 \
             --set-secrets="DATABASE_URL=DATABASE_URL:latest" \
             --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
             --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
@@ -128,38 +67,3 @@ jobs:
             --set-secrets="SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
             --clear-env-vars \
             --quiet
-
-      - name: Get Service URL
-        run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --project ${{ env.PROJECT_ID }} \
-            --format 'value(status.url)')
-          echo "✅ Service deployed at: $SERVICE_URL"
-          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
-
-      - name: Verify Deployment
-        run: |
-          echo "⏳ Waiting for service to be ready (30s)..."
-          sleep 30
-          
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --project ${{ env.PROJECT_ID }} \
-            --format 'value(status.url)')
-          
-          echo "🔍 Testing health endpoint..."
-          curl -f "${SERVICE_URL}/health" || echo "⚠️ Health check failed - service might still be starting"
-          
-          echo "🔍 Testing root endpoint..."
-          curl -f "${SERVICE_URL}/" || echo "⚠️ Root endpoint not responding yet"
-
-      - name: Deployment Summary
-        run: |
-          echo "==================== DEPLOYMENT SUMMARY ===================="
-          echo "✅ Service: ${{ env.SERVICE_NAME }}"
-          echo "✅ Region: ${{ env.REGION }}"
-          echo "✅ Image: $IMAGE_TAG"
-          echo "✅ URL: ${{ env.SERVICE_URL }}"
-          echo "✅ Secrets: DATABASE_URL, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET_NAME"
-          echo "============================================================"
