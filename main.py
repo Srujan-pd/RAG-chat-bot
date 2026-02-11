@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from chat import router as chat_router
 from voice_chat import router as voice_router
-from rag_engine import start_loading_vectorstore, initialize_gemini, wait_for_vectorstore
+from rag_engine import start_loading_vectorstore, initialize_gemini, wait_for_vectorstore, db, is_loading
 from database import engine, Base
 import models
 
@@ -51,10 +51,6 @@ async def startup_tasks():
     if not gemini_initialized:
         logger.error("❌ Failed to initialize Gemini - voice features may not work")
     
-    # Initialize RAG system
-    logger.info("📚 Starting RAG system...")
-    start_loading_vectorstore()
-    
     # Initialize Database
     try:
         if engine is not None:
@@ -65,10 +61,26 @@ async def startup_tasks():
     except Exception as e:
         logger.error(f"⚠️ DB initialization failed: {e}")
     
-    # Wait a bit for vector store to start loading
-    logger.info("⏳ Allowing vector store to initialize...")
+    # CRITICAL FIX: Start RAG system and WAIT for it to complete
+    logger.info("📚 Starting RAG system and waiting for vector store to load...")
+    start_loading_vectorstore()
     
-    logger.info("✅ Startup complete!")
+    # Wait for vector store with extended timeout for cold starts
+    logger.info("⏳ Waiting up to 180 seconds for vector store to load...")
+    if wait_for_vectorstore(timeout=180):
+        logger.info("✅ Vector store loaded successfully during startup!")
+        from rag_engine import db
+        if db:
+            # Test the vector store
+            try:
+                test_results = db.similarity_search("test", k=1)
+                logger.info(f"✅ Vector store test successful - found {len(test_results)} results")
+            except Exception as e:
+                logger.error(f"⚠️ Vector store test failed: {e}")
+    else:
+        logger.error("❌ Vector store failed to load during startup - will retry on requests")
+    
+    logger.info("✅ Startup complete! Application is ready to handle requests.")
 
 @app.on_event("shutdown")
 async def shutdown_tasks():
@@ -93,19 +105,34 @@ async def health_check():
         "version": "2.1.0",
         "timestamp": time.time(),
         "components": {
-            "vectorstore": vectorstore_status,
+            "vectorstore": {
+                "status": vectorstore_status,
+                "loaded": db is not None,
+                "loading": is_loading,
+                "error": loading_error
+            },
             "database": "connected" if engine else "disabled",
-            "gemini": "initialized" if hasattr(initialize_gemini, '__call__') else "checking"
-        }
+            "gemini": "initialized" if gemini_initialized else "failed"
+        },
+        "uptime": time.time() - startup_time if 'startup_time' in globals() else 0
     }
+
+# Track startup time
+startup_time = time.time()
 
 # Root endpoint
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
+    from rag_engine import db, is_loading
+    
+    vectorstore_status = "loading" if is_loading else "ready" if db else "not_loaded"
+    
     return {
         "message": "Primis Digital Support AI Bot API",
         "version": "2.1.0",
+        "status": "running",
+        "vectorstore": vectorstore_status,
         "endpoints": {
             "chat": "/chat/",
             "chat_history": "/chat/history/{user_id}",
@@ -113,8 +140,7 @@ async def root():
             "voice_tts": "/voice/tts",
             "health": "/health",
             "docs": "/docs"
-        },
-        "status": "running"
+        }
     }
 
 # Error handlers
@@ -130,3 +156,28 @@ async def global_exception_handler(request, exc):
             "contact": "contact@primisdigital.com"
         }
     )
+
+# Liveness probe endpoint for Cloud Run
+@app.get("/health/liveness")
+async def liveness_check():
+    """Liveness probe for Cloud Run"""
+    return {"status": "alive"}
+
+# Readiness probe endpoint for Cloud Run
+@app.get("/health/readiness")
+async def readiness_check():
+    """Readiness probe for Cloud Run - only returns 200 when vector store is ready"""
+    from rag_engine import db, is_loading
+    
+    if db is not None:
+        return {"status": "ready", "vectorstore": "loaded"}
+    elif not is_loading:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "vectorstore": "failed"}
+        )
+    else:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "vectorstore": "loading"}
+        )

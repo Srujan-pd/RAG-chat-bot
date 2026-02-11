@@ -44,7 +44,7 @@ def initialize_gemini():
         logger.error(f"❌ Failed to initialize Gemini: {str(e)}")
         return False
 
-def wait_for_vectorstore(timeout=45):
+def wait_for_vectorstore(timeout=120):
     """Wait for vector store to load with timeout"""
     global is_loading, db, loading_error
     
@@ -196,7 +196,7 @@ def get_answer(question, session_id=None, db_session=None):
         if not wait_for_vectorstore():
             return (
                 "🔄 System is initializing. Please try again in a few seconds.\n\n"
-                "If this persists, contact support@primisdigital.com"
+                "If this persists, contact info@primisdigital.com"
             )
     
     try:
