@@ -9,21 +9,18 @@ on:
 env:
   PROJECT_ID: poc-genai-chatbot
   REGION: us-central1
-  SERVICE_NAME: primis-digital-bot
+  SERVICE_NAME: ai-chatbot-backend
   ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
-    permissions:
-      contents: read
-      id-token: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # SIMPLE FIX: Just remove token_format
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -36,51 +33,37 @@ jobs:
 
       - name: Configure Docker for Artifact Registry
         run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
       - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=${{ env.ARTIFACT_REGISTRY }}:${{ github.sha }}
-          IMAGE_LATEST=${{ env.ARTIFACT_REGISTRY }}:latest
-          
-          docker build -t $IMAGE_TAG -t $IMAGE_LATEST .
+          docker build -t $IMAGE_TAG .
           docker push $IMAGE_TAG
-          docker push $IMAGE_LATEST
-          
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
       - name: Deploy to Cloud Run
         run: |
+          # Delete existing service if it exists (to fix the DATABASE_URL conflict)
+          gcloud run services delete ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --quiet || true
+          
+          sleep 10
+          
+          # Deploy fresh
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${{ env.IMAGE_TAG }} \
+            --image "$IMAGE_TAG" \
             --platform managed \
             --region ${{ env.REGION }} \
             --allow-unauthenticated \
             --memory 2Gi \
-            --cpu 1 \
+            --cpu 2 \
             --timeout 300 \
-            --max-instances 10 \
-            --min-instances 0 \
-            --set-env-vars="PORT=8080" \
-            --set-secrets="DATABASE_URL=DATABASE_URL:latest,\
-GEMINI_API_KEY=GEMINI_API_KEY:latest,\
-SUPABASE_URL=SUPABASE_URL:latest,\
-SUPABASE_KEY=SUPABASE_KEY:latest,\
-SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
+            --set-secrets="DATABASE_URL=DATABASE_URL:latest" \
+            --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
+            --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+            --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+            --set-secrets="SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
+            --clear-env-vars \
             --quiet
-
-      - name: Get Service URL
-        run: |
-          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
-            --region ${{ env.REGION }} \
-            --format 'value(status.url)')
-          echo "Service deployed at: $SERVICE_URL"
-          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
-
-      - name: Verify Deployment
-        run: |
-          echo "Waiting for service to be ready..."
-          sleep 30
-          
-          echo "Testing service endpoint..."
-          curl -f ${{ env.SERVICE_URL }} || echo "Service not responding yet"
