@@ -9,7 +9,7 @@ on:
 env:
   PROJECT_ID: poc-genai-chatbot
   REGION: us-central1
-  SERVICE_NAME: primis-digital-bot
+  SERVICE_NAME: ai-chatbot-backend
   ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot
 
 jobs:
