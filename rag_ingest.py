@@ -7,7 +7,11 @@ from urllib.parse import urljoin, urlparse
 import time
 import os
 import json
+import logging
 from supabase_manager import SupabaseStorageManager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
 BASE_URL = "https://primisdigital.com/"
@@ -25,9 +29,11 @@ def fetch_text(url):
     """Extract text content from a URL using BeautifulSoup"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
         }
-        r = requests.get(url, timeout=10, headers=headers)
+        r = requests.get(url, timeout=15, headers=headers)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -35,9 +41,16 @@ def fetch_text(url):
         for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
             tag.decompose()
 
-        return soup.get_text(separator=" ", strip=True)
+        # Get text with better formatting
+        text = soup.get_text(separator="\n", strip=True)
+        
+        # Clean up whitespace
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        text = ' '.join(lines)
+        
+        return text
     except Exception as e:
-        print(f"❌ Error fetching {url}: {e}")
+        logger.error(f"❌ Error fetching {url}: {e}")
         return ""
 
 def get_all_links(url, base_url):
@@ -53,6 +66,9 @@ def get_all_links(url, base_url):
         links = set()
         for link in soup.find_all('a', href=True):
             href = link['href']
+            if href.startswith('#') or href.startswith('javascript:'):
+                continue
+                
             full_url = urljoin(base_url, href)
             full_url = full_url.split('#')[0].split('?')[0]
 
@@ -61,7 +77,7 @@ def get_all_links(url, base_url):
 
         return links
     except Exception as e:
-        print(f"❌ Error getting links from {url}: {e}")
+        logger.error(f"❌ Error getting links from {url}: {e}")
         return set()
 
 def crawl_website(start_url, max_pages=MAX_PAGES):
@@ -70,27 +86,31 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
     to_visit = {start_url}
     all_pages = []
 
-    print(f"🚀 Starting crawl from: {start_url}")
+    logger.info(f"🚀 Starting crawl from: {start_url}")
 
     while to_visit and len(visited) < max_pages:
         url = to_visit.pop()
         if url in visited:
             continue
 
-        print(f"🔹 [{len(visited) + 1}/{max_pages}] Crawling: {url}")
+        logger.info(f"🔹 [{len(visited) + 1}/{max_pages}] Crawling: {url}")
 
         text = fetch_text(url)
-        if text:
-            all_pages.append({
+        if text and len(text) > 200:  # Only save pages with substantial content
+            page_data = {
                 "url": url,
-                "content": text
-            })
+                "content": text,
+                "timestamp": time.time()
+            }
+            all_pages.append(page_data)
+            logger.info(f"   ✅ Saved: {len(text)} chars")
 
         new_links = get_all_links(url, start_url)
         to_visit.update(new_links - visited)
         visited.add(url)
         time.sleep(DELAY)
 
+    logger.info(f"✅ Crawl complete: {len(all_pages)} pages saved")
     return all_pages
 
 def ingest_website():
@@ -100,44 +120,60 @@ def ingest_website():
     all_pages = crawl_website(BASE_URL, MAX_PAGES)
 
     if not all_pages:
-        print("❌ No content found!")
+        logger.error("❌ No content found!")
         return
+
+    # Save raw crawled data
+    os.makedirs('data', exist_ok=True)
+    with open('data/raw_crawl.json', 'w', encoding='utf-8') as f:
+        json.dump(all_pages, f, ensure_ascii=False, indent=2)
 
     # Step 2: Combine and Chunk Text
     full_text = "\n\n".join([f"--- PAGE: {p['url']} ---\n\n{p['content']}" for p in all_pages])
     
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
-        chunk_overlap=50
+        chunk_overlap=50,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     chunks = splitter.split_text(full_text)
-    print(f"\n📄 Total chunks created: {len(chunks)}")
+    logger.info(f"📄 Total chunks created: {len(chunks)}")
+
+    # Save chunks
+    with open('data/chunks_raw.json', 'w', encoding='utf-8') as f:
+        json.dump(chunks, f, ensure_ascii=False, indent=2)
 
     # Step 3: Create embeddings
-    print("🔧 Creating embeddings (HuggingFace)...")
+    logger.info("🔧 Creating embeddings (HuggingFace)...")
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     # Step 4: Create and Save FAISS vector store locally
-    print("💾 Saving FAISS index to local folder 'vectorstore'...")
+    logger.info("💾 Saving FAISS index to local folder 'vectorstore'...")
     db = FAISS.from_texts(chunks, embeddings)
     db.save_local("vectorstore")
 
-    # Step 5: Upload to Supabase (The New Part)
-    print("\n☁️ Connecting to Supabase...")
+    # Step 5: Upload to Supabase
+    logger.info("\n☁️ Connecting to Supabase...")
     try:
         storage = SupabaseStorageManager()
         
-        print(f"☁️ Uploading to Supabase bucket: {BUCKET_NAME}...")
-        # Uploading to the 'vectorstore' folder inside the bucket
+        logger.info(f"☁️ Uploading to Supabase bucket: {BUCKET_NAME}...")
+        
+        # Ensure the bucket exists
         storage.upload_file("vectorstore/index.faiss", "vectorstore/index.faiss", BUCKET_NAME)
         storage.upload_file("vectorstore/index.pkl", "vectorstore/index.pkl", BUCKET_NAME)
         
-        print("\n✅ Success! Website ingested and Supabase vector store updated.")
+        logger.info("\n✅ Success! Website ingested and Supabase vector store updated.")
+        
+        # Verify upload
+        files = storage.list_files(BUCKET_NAME, "vectorstore")
+        logger.info(f"📁 Files in bucket: {len(files)}")
+        
     except Exception as e:
-        print(f"\n❌ Supabase Upload Failed: {e}")
-        print("Check if 'vectorstore-bucket' exists in your Supabase Storage dashboard.")
+        logger.error(f"\n❌ Supabase Upload Failed: {e}")
+        logger.error("Check if 'vectorstore-bucket' exists in your Supabase Storage dashboard.")
 
 if __name__ == "__main__":
     ingest_website()
