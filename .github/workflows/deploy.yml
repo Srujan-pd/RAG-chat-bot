@@ -9,18 +9,21 @@ on:
 env:
   PROJECT_ID: poc-genai-chatbot
   REGION: us-central1
-  SERVICE_NAME: ai-chatbot-backend
+  SERVICE_NAME: primis-digital-bot
   ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/poc-genai-chatbot/cloud-run-source-deploy/primis-digital-bot
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # SIMPLE FIX: Just remove token_format
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -33,30 +36,80 @@ jobs:
 
       - name: Configure Docker for Artifact Registry
         run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
       - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=${{ env.ARTIFACT_REGISTRY }}:${{ github.sha }}
-          docker build -t $IMAGE_TAG .
+          IMAGE_LATEST=${{ env.ARTIFACT_REGISTRY }}:latest
+          
+          # Build Docker image
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $IMAGE_TAG \
+            -t $IMAGE_LATEST \
+            .
+          
+          # Push images
           docker push $IMAGE_TAG
+          docker push $IMAGE_LATEST
+          
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-          --image "$IMAGE_TAG" \
-          --platform managed \
-          --region ${{ env.REGION }} \
-          --allow-unauthenticated \
-          --memory 4Gi \
-          --cpu 2 \
-          --timeout 900 \
-          --execution-environment=gen2 \
-          --cpu-boost \
-          --concurrency 80 \
-          --min-instances 1 \  # Keep 1 instance always warm
-          --max-instances 10 \
-          --update-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_KEY=${{ secrets.SUPABASE_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},SUPABASE_BUCKET_NAME=${{ secrets.SUPABASE_BUCKET_NAME }}" \
-          --quiet
-            
+            --image "$IMAGE_TAG" \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --allow-unauthenticated \
+            --memory 4Gi \
+            --cpu 2 \
+            --timeout 300 \
+            --max-instances 10 \
+            --min-instances 0 \
+            --port 8080 \
+            --set-env-vars="PORT=8080,PYTHONUNBUFFERED=1" \
+            --update-secrets="DATABASE_URL=DATABASE_URL:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,SUPABASE_BUCKET_NAME=SUPABASE_BUCKET_NAME:latest" \
+            --quiet
+
+      - name: Get Service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "Service deployed at: $SERVICE_URL"
+          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
+
+      - name: Verify Deployment
+        run: |
+          echo "Waiting for service to be ready..."
+          sleep 45
+          
+          echo "Testing health endpoint..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.SERVICE_URL }}/health)
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Deployment successful! Health check passed."
+          else
+            echo "⚠️ Warning: Health check returned HTTP $HTTP_CODE"
+          fi
+          
+          echo "Testing root endpoint..."
+          curl -s ${{ env.SERVICE_URL }} | jq '.' || echo "Root endpoint test completed"
+
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** ${{ env.REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL:** ${{ env.SERVICE_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** $IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Endpoints Available:" >> $GITHUB_STEP_SUMMARY
+          echo "- Health: ${{ env.SERVICE_URL }}/health" >> $GITHUB_STEP_SUMMARY
+          echo "- Chat: ${{ env.SERVICE_URL }}/chat/" >> $GITHUB_STEP_SUMMARY
+          echo "- Voice: ${{ env.SERVICE_URL }}/voice/" >> $GITHUB_STEP_SUMMARY
+          echo "- Docs: ${{ env.SERVICE_URL }}/docs" >> $GITHUB_STEP_SUMMARY
+
